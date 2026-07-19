@@ -23,6 +23,8 @@ const BALANCE_INTERVAL_MS = 15_000;
 const PRIVATE_RECONNECT_INTERVAL_MS = 30_000;
 const LOOP_INTERVAL_MS = 1_000;
 const ERROR_RETRY_MS = 15_000;
+const INITIAL_RATE_LIMIT_RETRY_MS = 60_000;
+const MAX_RATE_LIMIT_RETRY_MS = 5 * 60_000;
 const MAX_MARKETS_PER_SUBSCRIPTION = 100;
 const MAX_LIVE_EVENT_PAGES = 10;
 
@@ -49,10 +51,39 @@ function sameSlugs(left: Map<string, TrackedMarket>, right: TrackedMarket[]) {
   return right.every((market) => left.has(market.marketSlug));
 }
 
+function errorStatus(error: unknown) {
+  return typeof error === "object" && error !== null && "status" in error
+    ? Number((error as { status?: unknown }).status)
+    : 0;
+}
+
+export function isRateLimitError(error: unknown) {
+  if (errorStatus(error) === 429) return true;
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return message.includes("error 1015") || message.includes("being rate limited");
+}
+
+export function retryPlan(error: unknown, currentRateLimitDelayMs: number) {
+  if (!isRateLimitError(error)) {
+    return {
+      delayMs: ERROR_RETRY_MS,
+      nextRateLimitDelayMs: INITIAL_RATE_LIMIT_RETRY_MS,
+    };
+  }
+  return {
+    delayMs: currentRateLimitDelayMs,
+    nextRateLimitDelayMs: Math.min(
+      currentRateLimitDelayMs * 2,
+      MAX_RATE_LIMIT_RETRY_MS,
+    ),
+  };
+}
+
 function publicWorkerError(error: unknown) {
   if (error instanceof Error) {
     const message = error.message.replace(/\s+/g, " ").trim();
-    if (message.includes("<!doctype html") || message.includes("<html")) {
+    if (isRateLimitError(error)) {
       return "Polymarket is temporarily rate-limiting connections. The worker will retry automatically.";
     }
     return message.slice(0, 220);
@@ -72,6 +103,7 @@ export class AutomationWorker {
   private lastDiscoveryAt = 0;
   private lastBalanceAt = 0;
   private lastPrivateAttemptAt = 0;
+  private rateLimitRetryMs = INITIAL_RATE_LIMIT_RETRY_MS;
   private shuttingDown = false;
   private qualifiedQuoteQueue: Promise<void> = Promise.resolve();
 
@@ -154,7 +186,10 @@ export class AutomationWorker {
           stopReason: null,
           monitoredMarkets: this.trackedMarkets.size,
         });
+        this.rateLimitRetryMs = INITIAL_RATE_LIMIT_RETRY_MS;
       } catch (error) {
+        const retry = retryPlan(error, this.rateLimitRetryMs);
+        this.rateLimitRetryMs = retry.nextRateLimitDelayMs;
         this.closeMarketSocket();
         this.store.updateRuntime({
           state: "error",
@@ -162,7 +197,7 @@ export class AutomationWorker {
           lastError: publicWorkerError(error),
           stopReason: "The worker will retry automatically.",
         });
-        await sleep(ERROR_RETRY_MS);
+        await sleep(retry.delayMs);
         continue;
       }
 
