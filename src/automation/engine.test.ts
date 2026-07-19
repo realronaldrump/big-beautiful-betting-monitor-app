@@ -227,6 +227,46 @@ describe("AutomationEngine", () => {
     store.close();
   });
 
+  it("returns rate limits to the worker without consuming an order attempt", async () => {
+    const store = makeStore();
+    store.updateConfig({ enabled: true, balanceFloor: 100, triggerPrice: 0.75 });
+    const rateLimit = Object.assign(new Error("Too Many Requests"), { status: 429 });
+    const adapter: TradingAdapter = {
+      previewOrder: vi.fn().mockRejectedValue(rateLimit),
+      createOrder: vi.fn(),
+      getQuote: vi.fn(),
+      getBalances: vi.fn(),
+      sleep: vi.fn(),
+    };
+    const engine = new AutomationEngine(store, adapter);
+
+    await expect(
+      engine.processQuote({
+        market: {
+          marketSlug: "rate-limited-market",
+          eventSlug: "rate-limited-event",
+          eventTitle: "Rate limited event",
+          marketTitle: "Rate limited market",
+          longOutcome: "Yes",
+          shortOutcome: "No",
+          minimumTradeQty: 0.01,
+          priceTickSize: 0.01,
+          isLive: true,
+          isOpen: true,
+        },
+        quote: { bestBid: 0.74, bestAsk: 0.75 },
+        balances: { currentBalance: 250, buyingPower: 100 },
+      }),
+    ).rejects.toBe(rateLimit);
+    expect(store.getAttempt("rate-limited-market")).toMatchObject({
+      status: "retryable",
+      attempts: 0,
+    });
+    expect(adapter.createOrder).not.toHaveBeenCalled();
+
+    store.close();
+  });
+
   it("skips a market whose minimum quantity would cost more than one dollar", async () => {
     const store = makeStore();
     store.updateConfig({ enabled: true, balanceFloor: 100, triggerPrice: 0.95 });

@@ -162,6 +162,20 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Order request failed";
 }
 
+function isRateLimitError(error: unknown) {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "status" in error &&
+    Number((error as { status?: unknown }).status) === 429
+  ) {
+    return true;
+  }
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return message.includes("error 1015") || message.includes("being rate limited");
+}
+
 function isDefiniteHttpRejection(error: unknown) {
   if (typeof error !== "object" || error === null || !("status" in error)) {
     return false;
@@ -256,6 +270,10 @@ export class AutomationEngine {
         try {
           await this.adapter.previewOrder(order);
         } catch (error) {
+          if (isRateLimitError(error)) {
+            this.store.deferAttempt(market.marketSlug, errorMessage(error));
+            throw error;
+          }
           const canRetry = this.store.markExplicitRejection(
             market.marketSlug,
             `Preview failed: ${errorMessage(error)}`,
@@ -304,6 +322,10 @@ export class AutomationEngine {
           this.store.markSubmitted(market.marketSlug, response.id);
           return "submitted";
         } catch (error) {
+          if (isRateLimitError(error)) {
+            this.store.deferAttempt(market.marketSlug, errorMessage(error));
+            throw error;
+          }
           if (isDefiniteHttpRejection(error)) {
             const canRetry = this.store.markExplicitRejection(
               market.marketSlug,

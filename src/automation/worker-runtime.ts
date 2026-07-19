@@ -16,21 +16,62 @@ import {
 } from "@/automation/polymarket-adapter";
 import { getAutomationStore, type AutomationStore } from "@/automation/store";
 import { AUTOMATION_RULES } from "@/automation/strategy";
-import { extractOrderExecution } from "@/automation/websocket-parsers";
+import {
+  extractAccountBalances,
+  extractOrderExecution,
+} from "@/automation/websocket-parsers";
 
 const DISCOVERY_INTERVAL_MS = 15_000;
-const BALANCE_INTERVAL_MS = 15_000;
+const BALANCE_INTERVAL_MS = 60_000;
 const PRIVATE_RECONNECT_INTERVAL_MS = 30_000;
 const LOOP_INTERVAL_MS = 1_000;
 const ERROR_RETRY_MS = 15_000;
-const INITIAL_RATE_LIMIT_RETRY_MS = 60_000;
-const MAX_RATE_LIMIT_RETRY_MS = 5 * 60_000;
-const RATE_LIMIT_RECOVERY_MS = 10 * 60_000;
+const INITIAL_RATE_LIMIT_RETRY_MS = 1_000;
+const MAX_RATE_LIMIT_RETRY_MS = 30_000;
+const RATE_LIMIT_RECOVERY_MS = 60_000;
 const MAX_MARKETS_PER_SUBSCRIPTION = 100;
 const MAX_LIVE_EVENT_PAGES = 10;
 
 function sleep(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
+export async function waitForRetryOrConfigChange(options: {
+  delayMs: number;
+  initialConfigUpdatedAt: string;
+  readConfigUpdatedAt: () => string;
+  isStopping: () => boolean;
+  sleepFn?: (milliseconds: number) => Promise<void>;
+}) {
+  const sleepFn = options.sleepFn || sleep;
+  let remainingMs = options.delayMs;
+
+  while (remainingMs > 0) {
+    if (options.isStopping()) return "stopped" as const;
+    const intervalMs = Math.min(250, remainingMs);
+    await sleepFn(intervalMs);
+    remainingMs -= intervalMs;
+    if (options.isStopping()) return "stopped" as const;
+    if (options.readConfigUpdatedAt() !== options.initialConfigUpdatedAt) {
+      return "config-changed" as const;
+    }
+  }
+
+  return "elapsed" as const;
+}
+
+export class MarketWorkGate {
+  private readonly inFlight = new Set<string>();
+
+  begin(marketSlug: string) {
+    if (this.inFlight.has(marketSlug)) return false;
+    this.inFlight.add(marketSlug);
+    return true;
+  }
+
+  end(marketSlug: string) {
+    this.inFlight.delete(marketSlug);
+  }
 }
 
 function amountValue(value: { value: string } | undefined) {
@@ -94,7 +135,7 @@ function publicWorkerError(error: unknown) {
   if (error instanceof Error) {
     const message = error.message.replace(/\s+/g, " ").trim();
     if (isRateLimitError(error)) {
-      return "Polymarket is temporarily rate-limiting connections. The worker will retry automatically.";
+      return "Polymarket briefly throttled a request. The worker is reducing request pressure and retrying shortly.";
     }
     return message.slice(0, 220);
   }
@@ -116,6 +157,8 @@ export class AutomationWorker {
   private rateLimitRetryMs = INITIAL_RATE_LIMIT_RETRY_MS;
   private lastRateLimitAt: number | null = null;
   private pendingRateLimitError: unknown | null = null;
+  private readonly marketWorkGate = new MarketWorkGate();
+  private quoteQueueGeneration = 0;
   private shuttingDown = false;
   private qualifiedQuoteQueue: Promise<void> = Promise.resolve();
 
@@ -220,7 +263,12 @@ export class AutomationWorker {
           lastError: publicWorkerError(error),
           stopReason: "The worker will retry automatically.",
         });
-        await sleep(retry.delayMs);
+        await waitForRetryOrConfigChange({
+          delayMs: retry.delayMs,
+          initialConfigUpdatedAt: config.updatedAt,
+          readConfigUpdatedAt: () => this.store.getConfig().updatedAt,
+          isStopping: () => this.shuttingDown,
+        });
         continue;
       }
 
@@ -324,24 +372,40 @@ export class AutomationWorker {
 
     const previous = this.store.getAttempt(marketSlug);
     if (previous && previous.status !== "retryable") return;
+    if (!this.marketWorkGate.begin(marketSlug)) return;
+    const generation = this.quoteQueueGeneration;
 
     this.qualifiedQuoteQueue = this.qualifiedQuoteQueue
       .then(async () => {
-        if (this.shuttingDown || !this.store.getConfig().enabled) return;
-        const [balances, latestQuote] = await Promise.all([
-          this.adapter.getBalances(),
-          this.adapter.getQuote(marketSlug),
-        ]);
-        this.store.updateRuntime({
-          currentBalance: balances.currentBalance,
-          buyingPower: balances.buyingPower,
-        });
-        await this.engine.processQuote({ market, quote: latestQuote, balances });
+        if (
+          this.shuttingDown ||
+          generation !== this.quoteQueueGeneration ||
+          !this.store.getConfig().enabled
+        ) {
+          return;
+        }
+
+        const runtime = this.store.getRuntime();
+        const balances =
+          runtime.currentBalance === null || runtime.buyingPower === null
+            ? await this.adapter.getBalances()
+            : {
+                currentBalance: runtime.currentBalance,
+                buyingPower: runtime.buyingPower,
+              };
+        const result = await this.engine.processQuote({ market, quote, balances });
+
+        if (result !== "ignored") {
+          const refreshed = await this.adapter.getBalances();
+          this.store.updateRuntime(refreshed);
+          this.lastBalanceAt = Date.now();
+        }
       })
       .catch((error) => {
         if (this.shuttingDown) return;
         this.handleAsyncWorkerError(error);
-      });
+      })
+      .finally(() => this.marketWorkGate.end(marketSlug));
   }
 
   private async ensurePrivateSocket() {
@@ -351,6 +415,12 @@ export class AutomationWorker {
     const socket = this.client.ws.private();
     this.privateSocket = socket;
     socket.on("orderUpdate", (message) => this.handleOrderUpdate(message));
+    socket.on("accountBalanceSnapshot", (message) =>
+      this.handleAccountBalances(message),
+    );
+    socket.on("accountBalanceUpdate", (message) =>
+      this.handleAccountBalances(message),
+    );
     socket.on("error", (error) => {
       if (this.shuttingDown) return;
       this.handleAsyncWorkerError(error);
@@ -360,6 +430,7 @@ export class AutomationWorker {
     });
     await socket.connect();
     socket.subscribeOrders("bbbm-orders");
+    socket.subscribeAccountBalance("bbbm-balance");
   }
 
   private async tryPrivateSocket() {
@@ -421,12 +492,21 @@ export class AutomationWorker {
     }
   }
 
+  private handleAccountBalances(message: unknown) {
+    if (this.shuttingDown) return;
+    const balances = extractAccountBalances(message);
+    if (!balances) return;
+    this.lastBalanceAt = Date.now();
+    this.store.updateRuntime(balances);
+  }
+
   private closeMarketSocket() {
     const socket = this.marketSocket;
     this.marketSocket = null;
     socket?.close();
     this.trackedMarkets.clear();
     this.lastDiscoveryAt = 0;
+    this.quoteQueueGeneration += 1;
   }
 
   private closeSockets() {

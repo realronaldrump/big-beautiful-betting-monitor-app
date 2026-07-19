@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { extractOrderExecution } from "@/automation/websocket-parsers";
+import {
+  extractAccountBalances,
+  extractOrderExecution,
+} from "@/automation/websocket-parsers";
 
 describe("extractOrderExecution", () => {
   it("reads both documented and newer SDK order-update envelopes", () => {
@@ -17,5 +20,30 @@ describe("extractOrderExecution", () => {
   it("returns null for unrelated or incomplete messages", () => {
     expect(extractOrderExecution({ accountBalancesSnapshot: {} })).toBeNull();
     expect(extractOrderExecution({ orderUpdate: {} })).toBeNull();
+  });
+
+  it("reads account balances from both live and documented envelopes", () => {
+    expect(
+      extractAccountBalances({
+        accountBalancesSnapshot: {
+          balances: [
+            {
+              currency: "USD",
+              currentBalance: 155.71,
+              buyingPower: 153.38,
+            },
+          ],
+        },
+      }),
+    ).toEqual({ currentBalance: 155.71, buyingPower: 153.38 });
+
+    expect(
+      extractAccountBalances({
+        accountBalanceSubscriptionUpdate: {
+          balance: 154.71,
+          buyingPower: 152.38,
+        },
+      }),
+    ).toEqual({ currentBalance: 154.71, buyingPower: 152.38 });
   });
 });

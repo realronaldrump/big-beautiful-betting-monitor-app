@@ -355,6 +355,17 @@ export class AutomationStore {
     return canRetry;
   }
 
+  deferAttempt(marketSlug: string, message: string) {
+    this.db
+      .prepare(
+        `UPDATE automation_attempts
+         SET status = 'retryable', attempts = MAX(attempts - 1, 0),
+             last_error = ?, updated_at = ?
+         WHERE market_slug = ?`,
+      )
+      .run(message, now(), marketSlug);
+  }
+
   markSubmitted(marketSlug: string, orderId: string) {
     this.updateAttempt(marketSlug, "submitted", orderId, null);
   }

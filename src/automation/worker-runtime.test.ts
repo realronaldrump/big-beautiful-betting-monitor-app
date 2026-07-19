@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   hasSustainedRateLimitRecovery,
   isRateLimitError,
+  MarketWorkGate,
   retryPlan,
+  waitForRetryOrConfigChange,
 } from "./worker-runtime";
 
 describe("automation worker rate-limit backoff", () => {
@@ -14,33 +16,64 @@ describe("automation worker rate-limit backoff", () => {
     expect(isRateLimitError(new Error("Temporary connection failure"))).toBe(false);
   });
 
-  it("backs off exponentially and caps rate-limit retries at five minutes", () => {
-    expect(retryPlan({ status: 429 }, 60_000)).toEqual({
-      delayMs: 60_000,
-      nextRateLimitDelayMs: 120_000,
+  it("backs off exponentially and caps rate-limit retries at thirty seconds", () => {
+    expect(retryPlan({ status: 429 }, 1_000)).toEqual({
+      delayMs: 1_000,
+      nextRateLimitDelayMs: 2_000,
     });
-    expect(retryPlan({ status: 429 }, 240_000)).toEqual({
-      delayMs: 240_000,
-      nextRateLimitDelayMs: 300_000,
+    expect(retryPlan({ status: 429 }, 16_000)).toEqual({
+      delayMs: 16_000,
+      nextRateLimitDelayMs: 30_000,
     });
-    expect(retryPlan({ status: 429 }, 300_000)).toEqual({
-      delayMs: 300_000,
-      nextRateLimitDelayMs: 300_000,
+    expect(retryPlan({ status: 429 }, 30_000)).toEqual({
+      delayMs: 30_000,
+      nextRateLimitDelayMs: 30_000,
     });
   });
 
   it("uses the normal retry delay without discarding accumulated backoff", () => {
-    expect(retryPlan(new Error("Temporary connection failure"), 240_000)).toEqual({
+    expect(retryPlan(new Error("Temporary connection failure"), 16_000)).toEqual({
       delayMs: 15_000,
-      nextRateLimitDelayMs: 240_000,
+      nextRateLimitDelayMs: 16_000,
     });
   });
 
-  it("resets accumulated backoff only after ten clean minutes", () => {
+  it("resets accumulated backoff only after one clean minute", () => {
     const lastRateLimitAt = 1_000;
 
-    expect(hasSustainedRateLimitRecovery(lastRateLimitAt, 600_999)).toBe(false);
-    expect(hasSustainedRateLimitRecovery(lastRateLimitAt, 601_000)).toBe(true);
-    expect(hasSustainedRateLimitRecovery(null, 601_000)).toBe(false);
+    expect(hasSustainedRateLimitRecovery(lastRateLimitAt, 60_999)).toBe(false);
+    expect(hasSustainedRateLimitRecovery(lastRateLimitAt, 61_000)).toBe(true);
+    expect(hasSustainedRateLimitRecovery(null, 61_000)).toBe(false);
+  });
+
+  it("coalesces a burst of updates into one in-flight check per market", () => {
+    const gate = new MarketWorkGate();
+
+    expect(gate.begin("market-1")).toBe(true);
+    for (let update = 0; update < 100; update += 1) {
+      expect(gate.begin("market-1")).toBe(false);
+    }
+
+    gate.end("market-1");
+    expect(gate.begin("market-1")).toBe(true);
+  });
+
+  it("interrupts a long retry as soon as automation settings change", async () => {
+    let updatedAt = "before";
+    const sleeps: number[] = [];
+
+    const result = await waitForRetryOrConfigChange({
+      delayMs: 300_000,
+      initialConfigUpdatedAt: updatedAt,
+      readConfigUpdatedAt: () => updatedAt,
+      isStopping: () => false,
+      sleepFn: async (milliseconds) => {
+        sleeps.push(milliseconds);
+        updatedAt = "after";
+      },
+    });
+
+    expect(result).toBe("config-changed");
+    expect(sleeps).toEqual([250]);
   });
 });

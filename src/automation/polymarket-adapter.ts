@@ -13,7 +13,7 @@ export class ApiPacer {
   private tail: Promise<unknown> = Promise.resolve();
   private lastStartedAt = 0;
 
-  constructor(private readonly minimumSpacingMs = 60) {}
+  constructor(private readonly minimumSpacingMs = 100) {}
 
   run<T>(request: () => Promise<T>): Promise<T> {
     const next = this.tail.then(async () => {
