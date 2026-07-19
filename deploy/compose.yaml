@@ -1,0 +1,22 @@
+name: betting-monitor
+
+services:
+  app:
+    image: ghcr.io/realronaldrump/big-beautiful-betting-monitor-app:main
+    container_name: betting-monitor
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:8720:3000"
+    env_file:
+      - /home/davis/.config/betting-monitor/betting-monitor.env
+    environment:
+      AUTOMATION_DB_PATH: /data/automation.sqlite
+      NEXT_PUBLIC_BASE_PATH: /betting
+    volumes:
+      - /home/davis/.local/share/betting-monitor:/data
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
