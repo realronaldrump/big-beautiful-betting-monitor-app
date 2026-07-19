@@ -3153,6 +3153,10 @@ a {
     min-width: 0;
   }
 
+  .range-toggle button {
+    min-height: 2.75rem;
+  }
+
   .chart__head {
     flex-direction: column;
     align-items: stretch;
