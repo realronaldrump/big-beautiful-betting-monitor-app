@@ -1,6 +1,8 @@
 export const AUTOMATION_RULES = {
   triggerPrice: 0.95,
   maxPrice: 0.96,
+  maxTriggerPrice: 0.96,
+  maxConfigurablePrice: 0.99,
   targetStake: 1,
   maxRetries: 3,
 } as const;
@@ -17,6 +19,7 @@ export type QuoteBlockReason =
 export interface QuoteEvaluationInput {
   bestAsk: number;
   triggerPrice: number;
+  executionCap: number;
   currentBalance: number;
   buyingPower: number;
   balanceFloor: number;
@@ -41,6 +44,7 @@ export function evaluateQuote(input: QuoteEvaluationInput): QuoteEvaluation {
   const {
     bestAsk,
     triggerPrice,
+    executionCap,
     currentBalance,
     buyingPower,
     balanceFloor,
@@ -55,7 +59,7 @@ export function evaluateQuote(input: QuoteEvaluationInput): QuoteEvaluation {
   if (bestAsk < triggerPrice) {
     return { eligible: false, reason: "below-trigger" };
   }
-  if (bestAsk > AUTOMATION_RULES.maxPrice) {
+  if (bestAsk > executionCap) {
     return { eligible: false, reason: "above-price-cap" };
   }
   if (currentBalance - AUTOMATION_RULES.targetStake < balanceFloor) {
@@ -67,9 +71,9 @@ export function evaluateQuote(input: QuoteEvaluationInput): QuoteEvaluation {
 
   return {
     eligible: true,
-    limitPrice: AUTOMATION_RULES.maxPrice,
+    limitPrice: executionCap,
     quantity: Number(
-      (AUTOMATION_RULES.targetStake / AUTOMATION_RULES.maxPrice).toFixed(6),
+      (AUTOMATION_RULES.targetStake / executionCap).toFixed(6),
     ),
     targetStake: AUTOMATION_RULES.targetStake,
   };

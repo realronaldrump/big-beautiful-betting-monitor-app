@@ -5,6 +5,7 @@ describe("evaluateQuote", () => {
   const eligibleQuote = {
     bestAsk: 0.95,
     triggerPrice: 0.95,
+    executionCap: 0.96,
     currentBalance: 250,
     buyingPower: 50,
     balanceFloor: 100,
@@ -45,6 +46,30 @@ describe("evaluateQuote", () => {
         triggerPrice: 0.9,
       }),
     ).toEqual({ eligible: false, reason: "below-trigger" });
+  });
+
+  it("uses the configured execution cap for eligibility and order pricing", () => {
+    expect(
+      evaluateQuote({
+        ...eligibleQuote,
+        bestAsk: 0.92,
+        triggerPrice: 0.9,
+        executionCap: 0.92,
+      }),
+    ).toEqual({
+      eligible: true,
+      limitPrice: 0.92,
+      quantity: 1.086957,
+      targetStake: 1,
+    });
+    expect(
+      evaluateQuote({
+        ...eligibleQuote,
+        bestAsk: 0.93,
+        triggerPrice: 0.9,
+        executionCap: 0.92,
+      }),
+    ).toEqual({ eligible: false, reason: "above-price-cap" });
   });
 
   it("stops before a one dollar bet would cross the balance floor", () => {

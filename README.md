@@ -41,8 +41,8 @@ Automation is **off by default**. Turn it on from the Auto-bet panel only when y
 The strategy is:
 
 - Live sports events only
-- A configurable whole-cent trigger from 1¢ through 96¢ (95¢ by default)
-- Hard execution ceiling of 96¢
+- A configurable whole-cent trigger from 1¢ through 96¢ (95¢ by default) that cannot exceed the execution cap
+- A configurable whole-cent execution cap from 1¢ through 99¢ (96¢ by default); the trigger cannot exceed it
 - Up to $1 of contract value per order, aligned to each market's quantity increment
 - Immediate-or-cancel limit orders marked `MANUAL_ORDER_INDICATOR_AUTOMATIC`
 - One accepted bet per market, persisted across restarts
@@ -52,7 +52,7 @@ The strategy is:
 
 The dashboard switch is the master control. Turning it off stops new orders; it does not cancel or reverse an order that Polymarket already accepted.
 
-Trigger and cash-floor edits remain drafts until you press **Save live bet settings**. The panel reads the stored values back from SQLite and shows a timestamped **Bet settings locked in** confirmation only when that independent check matches the requested settings. The on/off switch remains immediate so Auto-bet can always be stopped without saving a draft first.
+Trigger, execution-cap, and cash-floor edits remain drafts until you press **Save settings**. The panel reads the stored values back from SQLite and shows a timestamped **Bet settings locked in** confirmation only when that independent check matches the requested settings. The on/off switch remains immediate so Auto-bet can always be stopped without saving a draft first.
 
 ## Updates
 

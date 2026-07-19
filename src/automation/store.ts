@@ -23,6 +23,7 @@ export interface AutomationConfig {
   enabled: boolean;
   balanceFloor: number;
   triggerPrice: number;
+  executionCap: number;
   updatedAt: string;
 }
 
@@ -61,6 +62,8 @@ export interface AutomationSnapshot {
   rules: {
     triggerPrice: number;
     maxPrice: number;
+    maxTriggerPrice: number;
+    maxConfigurablePrice: number;
     targetStake: number;
     maxRetries: number;
   };
@@ -71,6 +74,7 @@ type ConfigRow = {
   enabled: number;
   balance_floor: number;
   trigger_price: number;
+  execution_cap: number;
   updated_at: string;
 };
 
@@ -111,6 +115,7 @@ function mapConfig(row: ConfigRow): AutomationConfig {
     enabled: row.enabled === 1,
     balanceFloor: row.balance_floor,
     triggerPrice: row.trigger_price,
+    executionCap: row.execution_cap,
     updatedAt: row.updated_at,
   };
 }
@@ -166,6 +171,8 @@ export class AutomationStore {
         balance_floor REAL NOT NULL DEFAULT 100 CHECK (balance_floor >= 0),
         trigger_price REAL NOT NULL DEFAULT 0.95
           CHECK (trigger_price >= 0.01 AND trigger_price <= 0.96),
+        execution_cap REAL NOT NULL DEFAULT 0.96
+          CHECK (execution_cap >= 0.01 AND execution_cap <= 0.99),
         updated_at TEXT NOT NULL
       );
 
@@ -210,12 +217,19 @@ export class AutomationStore {
           CHECK (trigger_price >= 0.01 AND trigger_price <= 0.96)
       `);
     }
+    if (!configColumns.some((column) => column.name === "execution_cap")) {
+      this.db.exec(`
+        ALTER TABLE automation_config
+        ADD COLUMN execution_cap REAL NOT NULL DEFAULT 0.96
+          CHECK (execution_cap >= 0.01 AND execution_cap <= 0.99)
+      `);
+    }
 
     this.db
       .prepare(
         `INSERT OR IGNORE INTO automation_config
-          (id, enabled, balance_floor, trigger_price, updated_at)
-         VALUES (1, 0, 100, 0.95, ?)`,
+          (id, enabled, balance_floor, trigger_price, execution_cap, updated_at)
+         VALUES (1, 0, 100, 0.95, 0.96, ?)`,
       )
       .run(timestamp);
     this.db
@@ -230,7 +244,7 @@ export class AutomationStore {
   getConfig(): AutomationConfig {
     const row = this.db
       .prepare(
-        `SELECT enabled, balance_floor, trigger_price, updated_at
+        `SELECT enabled, balance_floor, trigger_price, execution_cap, updated_at
          FROM automation_config WHERE id = 1`,
       )
       .get() as ConfigRow;
@@ -241,18 +255,21 @@ export class AutomationStore {
     enabled: boolean;
     balanceFloor: number;
     triggerPrice: number;
+    executionCap: number;
   }): AutomationConfig {
     const timestamp = now();
     this.db
       .prepare(
         `UPDATE automation_config
-         SET enabled = ?, balance_floor = ?, trigger_price = ?, updated_at = ?
+         SET enabled = ?, balance_floor = ?, trigger_price = ?, execution_cap = ?,
+             updated_at = ?
          WHERE id = 1`,
       )
       .run(
         input.enabled ? 1 : 0,
         input.balanceFloor,
         input.triggerPrice,
+        input.executionCap,
         timestamp,
       );
     return this.getConfig();
@@ -413,7 +430,11 @@ export class AutomationStore {
     return {
       config,
       runtime: this.getRuntime(),
-      rules: { ...AUTOMATION_RULES, triggerPrice: config.triggerPrice },
+      rules: {
+        ...AUTOMATION_RULES,
+        triggerPrice: config.triggerPrice,
+        maxPrice: config.executionCap,
+      },
       recentAttempts: this.listRecentAttempts(),
     };
   }

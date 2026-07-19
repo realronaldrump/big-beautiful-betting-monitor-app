@@ -20,7 +20,7 @@ const stateLabels = {
 
 type SettingsWrite = Pick<
   AutomationSnapshot["config"],
-  "enabled" | "balanceFloor" | "triggerPrice"
+  "enabled" | "balanceFloor" | "triggerPrice" | "executionCap"
 >;
 
 interface SaveConfirmation {
@@ -52,7 +52,8 @@ function settingsMatch(
   return (
     saved.enabled === expected.enabled &&
     Math.abs(saved.balanceFloor - expected.balanceFloor) < 0.001 &&
-    Math.abs(saved.triggerPrice - expected.triggerPrice) < 0.000001
+    Math.abs(saved.triggerPrice - expected.triggerPrice) < 0.000001 &&
+    Math.abs(saved.executionCap - expected.executionCap) < 0.000001
   );
 }
 
@@ -77,6 +78,9 @@ export function AutomationPanel({
   const [triggerInput, setTriggerInput] = useState(
     String(Math.round(initialSnapshot.config.triggerPrice * 100)),
   );
+  const [capInput, setCapInput] = useState(
+    String(Math.round(initialSnapshot.config.executionCap * 100)),
+  );
   const draftDirtyRef = useRef(false);
   const savingRef = useRef(false);
   const latestConfigAtRef = useRef(initialSnapshot.config.updatedAt);
@@ -91,13 +95,29 @@ export function AutomationPanel({
     ? Number(triggerInput)
     : Number.NaN;
   const parsedTriggerPrice = parsedTriggerCents / 100;
+  const parsedCapCents = capInput.trim() ? Number(capInput) : Number.NaN;
+  const parsedExecutionCap = parsedCapCents / 100;
   const floorFieldDirty =
     !Number.isFinite(parsedFloor) ||
     Math.abs(parsedFloor - snapshot.config.balanceFloor) >= 0.001;
   const triggerFieldDirty =
     !Number.isFinite(parsedTriggerPrice) ||
     Math.abs(parsedTriggerPrice - snapshot.config.triggerPrice) >= 0.000001;
-  const maxTriggerCents = Math.round(snapshot.rules.maxPrice * 100);
+  const capFieldDirty =
+    !Number.isFinite(parsedExecutionCap) ||
+    Math.abs(parsedExecutionCap - snapshot.config.executionCap) >= 0.000001;
+  const maxConfigurableCapCents = Math.round(
+    snapshot.rules.maxConfigurablePrice * 100,
+  );
+  const maxTriggerCents = Math.max(
+    1,
+    Math.min(
+      Number.isFinite(parsedCapCents)
+        ? Math.round(parsedCapCents)
+        : maxConfigurableCapCents,
+      Math.round(snapshot.rules.maxTriggerPrice * 100),
+    ),
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -110,6 +130,7 @@ export function AutomationPanel({
         setTriggerInput(
           String(Math.round(payload.config.triggerPrice * 100)),
         );
+        setCapInput(String(Math.round(payload.config.executionCap * 100)));
       }
       setConfirmation((current) =>
         current?.updatedAt === payload.config.updatedAt ? current : null,
@@ -165,16 +186,23 @@ export function AutomationPanel({
     return confirmed;
   }, []);
 
-  function markDraftChanged(nextFloor: string, nextTrigger: string) {
+  function markDraftChanged(
+    nextFloor: string,
+    nextTrigger: string,
+    nextCap: string,
+  ) {
     const floor = nextFloor.trim() ? Number(nextFloor) : Number.NaN;
     const triggerCents = nextTrigger.trim()
       ? Number(nextTrigger)
       : Number.NaN;
+    const capCents = nextCap.trim() ? Number(nextCap) : Number.NaN;
     const dirty =
       !Number.isFinite(floor) ||
       !Number.isFinite(triggerCents) ||
+      !Number.isFinite(capCents) ||
       Math.abs(floor - snapshot.config.balanceFloor) >= 0.001 ||
-      Math.abs(triggerCents / 100 - snapshot.config.triggerPrice) >= 0.000001;
+      Math.abs(triggerCents / 100 - snapshot.config.triggerPrice) >= 0.000001 ||
+      Math.abs(capCents / 100 - snapshot.config.executionCap) >= 0.000001;
     draftDirtyRef.current = dirty;
     setIsDirty(dirty);
     if (dirty) setConfirmation(null);
@@ -197,14 +225,28 @@ export function AutomationPanel({
       setSettingsError("Enter a balance floor of zero dollars or more.");
       return;
     }
+    if (
+      !Number.isFinite(parsedExecutionCap) ||
+      parsedCapCents < 1 ||
+      parsedCapCents > maxConfigurableCapCents
+    ) {
+      setSettingsError(
+        `Enter an execution cap from 1 to ${maxConfigurableCapCents} cents.`,
+      );
+      return;
+    }
+    if (Math.abs(parsedCapCents - Math.round(parsedCapCents)) > 1e-8) {
+      setSettingsError("Enter the execution cap in whole cents.");
+      return;
+    }
     const triggerCents = parsedTriggerPrice * 100;
     if (
       !Number.isFinite(parsedTriggerPrice) ||
       triggerCents < 1 ||
-      triggerCents > initialSnapshot.rules.maxPrice * 100
+      triggerCents > maxTriggerCents
     ) {
       setSettingsError(
-        `Enter a trigger from 1 to ${Math.round(initialSnapshot.rules.maxPrice * 100)} cents.`,
+        `Enter a trigger from 1 to ${maxTriggerCents} cents.`,
       );
       return;
     }
@@ -217,6 +259,7 @@ export function AutomationPanel({
       enabled: snapshot.config.enabled,
       balanceFloor: parsedFloor,
       triggerPrice: parsedTriggerPrice,
+      executionCap: parsedExecutionCap,
     };
     beginSaving();
     try {
@@ -227,6 +270,7 @@ export function AutomationPanel({
       setTriggerInput(
         String(Math.round(confirmed.config.triggerPrice * 100)),
       );
+      setCapInput(String(Math.round(confirmed.config.executionCap * 100)));
       draftDirtyRef.current = false;
       setIsDirty(false);
       setRefreshError("");
@@ -255,6 +299,7 @@ export function AutomationPanel({
       enabled: !snapshot.config.enabled,
       balanceFloor: snapshot.config.balanceFloor,
       triggerPrice: snapshot.config.triggerPrice,
+      executionCap: snapshot.config.executionCap,
     };
     beginSaving();
     try {
@@ -267,6 +312,7 @@ export function AutomationPanel({
         setTriggerInput(
           String(Math.round(confirmed.config.triggerPrice * 100)),
         );
+        setCapInput(String(Math.round(confirmed.config.executionCap * 100)));
         setConfirmation({
           label: `Auto-bet turned ${confirmed.config.enabled ? "on" : "off"}`,
           updatedAt: confirmed.config.updatedAt,
@@ -303,7 +349,7 @@ export function AutomationPanel({
             </span>
           </div>
           <h2 id="automation-heading">Auto-bet</h2>
-          <p>Live entries, fixed guardrails, no approval prompts.</p>
+          <p>Live entries, configurable guardrails, no approval prompts.</p>
         </div>
 
         <div className="automation__master">
@@ -327,7 +373,7 @@ export function AutomationPanel({
           <div className="automation__section-head">
             <div>
               <span className="automation__eyebrow">Live bet settings</span>
-              <h3>Entry and reserve</h3>
+              <h3>Entry, cap, and reserve</h3>
             </div>
             <span className="automation__draft-badge" data-dirty={isDirty || undefined}>
               {isDirty ? "Unsaved changes" : "Using saved values"}
@@ -351,7 +397,7 @@ export function AutomationPanel({
                   aria-describedby="trigger-price-note"
                   onChange={(event) => {
                     setTriggerInput(event.target.value);
-                    markDraftChanged(floorInput, event.target.value);
+                    markDraftChanged(floorInput, event.target.value, capInput);
                   }}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") {
@@ -364,6 +410,38 @@ export function AutomationPanel({
               </div>
               <p id="trigger-price-note">
                 Buy either side when its live price reaches this level.
+              </p>
+            </div>
+
+            <div className="automation__field">
+              <label htmlFor="execution-cap">Execution cap</label>
+              <div className="automation__input-shell automation__cap">
+                <input
+                  id="execution-cap"
+                  type="number"
+                  min="1"
+                  max={maxConfigurableCapCents}
+                  step="1"
+                  inputMode="numeric"
+                  value={capInput}
+                  disabled={isSaving}
+                  data-dirty={capFieldDirty || undefined}
+                  aria-describedby="execution-cap-note"
+                  onChange={(event) => {
+                    setCapInput(event.target.value);
+                    markDraftChanged(floorInput, triggerInput, event.target.value);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void saveDraftSettings();
+                    }
+                  }}
+                />
+                <span>¢ maximum</span>
+              </div>
+              <p id="execution-cap-note">
+                Never submit an order above this outcome price.
               </p>
             </div>
 
@@ -383,7 +461,7 @@ export function AutomationPanel({
                   data-dirty={floorFieldDirty || undefined}
                   onChange={(event) => {
                     setFloorInput(event.target.value);
-                    markDraftChanged(event.target.value, triggerInput);
+                    markDraftChanged(event.target.value, triggerInput, capInput);
                   }}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") {
@@ -430,7 +508,7 @@ export function AutomationPanel({
                       ? "Auto-bet continues using the previous values"
                       : confirmation
                         ? `Verified from the saved record at ${formatConfirmationTime(confirmation.updatedAt)}`
-                        : "Edit either setting to prepare a change"}
+                        : "Edit any setting to prepare a change"}
                 </small>
               </span>
             </div>
@@ -451,9 +529,9 @@ export function AutomationPanel({
             </p>
           ) : null}
 
-          <dl className="automation__rules" aria-label="Fixed automatic betting rules">
+          <dl className="automation__rules" aria-label="Automatic betting rules">
             <div>
-              <dt>Execution cap</dt>
+              <dt>Active cap</dt>
               <dd>{Math.round(rules.maxPrice * 100)}¢</dd>
             </div>
             <div>

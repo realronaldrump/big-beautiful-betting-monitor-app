@@ -20,7 +20,7 @@ describe("AutomationEngine", () => {
     return new AutomationStore(path.join(directory, "automation.sqlite"));
   }
 
-  it("submits at a configured trigger with a separate 96 cent hard limit", async () => {
+  it("submits at a configured trigger with the configured execution cap", async () => {
     const store = makeStore();
     const previewOrder = vi.fn().mockResolvedValue(undefined);
     const createOrder = vi.fn().mockResolvedValue({ id: "order-1", executions: [] });
@@ -32,7 +32,12 @@ describe("AutomationEngine", () => {
       sleep: vi.fn(),
     };
     const engine = new AutomationEngine(store, adapter);
-    store.updateConfig({ enabled: true, balanceFloor: 100, triggerPrice: 0.9 });
+    store.updateConfig({
+      enabled: true,
+      balanceFloor: 100,
+      triggerPrice: 0.9,
+      executionCap: 0.92,
+    });
 
     await engine.processQuote({
       market: {
@@ -56,8 +61,8 @@ describe("AutomationEngine", () => {
       marketSlug: "rockies-win",
       intent: "ORDER_INTENT_BUY_LONG",
       type: "ORDER_TYPE_LIMIT",
-      price: { value: "0.96", currency: "USD" },
-      quantity: 1.04,
+      price: { value: "0.92", currency: "USD" },
+      quantity: 1.08,
       tif: "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
       participateDontInitiate: false,
       manualOrderIndicator: "MANUAL_ORDER_INDICATOR_AUTOMATIC",
@@ -72,9 +77,67 @@ describe("AutomationEngine", () => {
     store.close();
   });
 
+  it("does not submit a previewed order after the execution cap changes", async () => {
+    const store = makeStore();
+    store.updateConfig({
+      enabled: true,
+      balanceFloor: 100,
+      triggerPrice: 0.9,
+      executionCap: 0.92,
+    });
+    const createOrder = vi.fn();
+    const adapter: TradingAdapter = {
+      previewOrder: vi.fn().mockImplementation(async () => {
+        store.updateConfig({
+          enabled: true,
+          balanceFloor: 100,
+          triggerPrice: 0.9,
+          executionCap: 0.91,
+        });
+      }),
+      createOrder,
+      getQuote: vi.fn(),
+      getBalances: vi.fn(),
+      sleep: vi.fn(),
+    };
+    const engine = new AutomationEngine(store, adapter);
+
+    const result = await engine.processQuote({
+      market: {
+        marketSlug: "cap-changed",
+        eventSlug: "cap-changed-event",
+        eventTitle: "Cap changed event",
+        marketTitle: "Cap changed market",
+        longOutcome: "Yes",
+        shortOutcome: "No",
+        minimumTradeQty: 0.01,
+        priceTickSize: 0.01,
+        isLive: true,
+        isOpen: true,
+      },
+      quote: { bestBid: 0.89, bestAsk: 0.9 },
+      balances: { currentBalance: 250, buyingPower: 100 },
+    });
+
+    expect(result).toBe("ignored");
+    expect(createOrder).not.toHaveBeenCalled();
+    expect(store.getAttempt("cap-changed")).toMatchObject({
+      status: "retryable",
+      attempts: 0,
+      lastError: "Automation settings changed before submission",
+    });
+
+    store.close();
+  });
+
   it("uses the inverse four-cent limit when the NO side reaches 95 cents", async () => {
     const store = makeStore();
-    store.updateConfig({ enabled: true, balanceFloor: 100, triggerPrice: 0.95 });
+    store.updateConfig({
+      enabled: true,
+      balanceFloor: 100,
+      triggerPrice: 0.95,
+      executionCap: 0.96,
+    });
     const createOrder = vi.fn().mockResolvedValue({ id: "order-no", executions: [] });
     const adapter: TradingAdapter = {
       previewOrder: vi.fn().mockResolvedValue(undefined),
@@ -116,7 +179,12 @@ describe("AutomationEngine", () => {
 
   it("rechecks the quote and balance across three rejection retries", async () => {
     const store = makeStore();
-    store.updateConfig({ enabled: true, balanceFloor: 100, triggerPrice: 0.95 });
+    store.updateConfig({
+      enabled: true,
+      balanceFloor: 100,
+      triggerPrice: 0.95,
+      executionCap: 0.96,
+    });
     const rejected = {
       id: "rejected-order",
       executions: [
@@ -192,7 +260,12 @@ describe("AutomationEngine", () => {
 
   it("does not retry an ambiguous network failure that might have placed the order", async () => {
     const store = makeStore();
-    store.updateConfig({ enabled: true, balanceFloor: 100, triggerPrice: 0.95 });
+    store.updateConfig({
+      enabled: true,
+      balanceFloor: 100,
+      triggerPrice: 0.95,
+      executionCap: 0.96,
+    });
     const createOrder = vi.fn().mockRejectedValue(new Error("connection reset"));
     const adapter: TradingAdapter = {
       previewOrder: vi.fn().mockResolvedValue(undefined),
@@ -229,7 +302,12 @@ describe("AutomationEngine", () => {
 
   it("returns rate limits to the worker without consuming an order attempt", async () => {
     const store = makeStore();
-    store.updateConfig({ enabled: true, balanceFloor: 100, triggerPrice: 0.75 });
+    store.updateConfig({
+      enabled: true,
+      balanceFloor: 100,
+      triggerPrice: 0.75,
+      executionCap: 0.96,
+    });
     const rateLimit = Object.assign(new Error("Too Many Requests"), { status: 429 });
     const adapter: TradingAdapter = {
       previewOrder: vi.fn().mockRejectedValue(rateLimit),
@@ -269,7 +347,12 @@ describe("AutomationEngine", () => {
 
   it("skips a market whose minimum quantity would cost more than one dollar", async () => {
     const store = makeStore();
-    store.updateConfig({ enabled: true, balanceFloor: 100, triggerPrice: 0.95 });
+    store.updateConfig({
+      enabled: true,
+      balanceFloor: 100,
+      triggerPrice: 0.95,
+      executionCap: 0.96,
+    });
     const adapter: TradingAdapter = {
       previewOrder: vi.fn(),
       createOrder: vi.fn(),
@@ -306,7 +389,12 @@ describe("AutomationEngine", () => {
 
   it("treats a partial fill as the market's one bet even if the remainder rejects", async () => {
     const store = makeStore();
-    store.updateConfig({ enabled: true, balanceFloor: 100, triggerPrice: 0.95 });
+    store.updateConfig({
+      enabled: true,
+      balanceFloor: 100,
+      triggerPrice: 0.95,
+      executionCap: 0.96,
+    });
     const createOrder = vi.fn().mockResolvedValue({
       id: "partial-order",
       executions: [

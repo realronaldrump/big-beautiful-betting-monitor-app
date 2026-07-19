@@ -2596,7 +2596,8 @@ a {
   white-space: nowrap;
 }
 
-.automation__trigger input {
+.automation__trigger input,
+.automation__cap input {
   width: 3.2ch;
 }
 
@@ -3072,6 +3073,10 @@ a {
 }
 
 @media (min-width: 68rem) {
+  .automation__fields {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .automation__body {
     grid-template-columns: minmax(0, 1.55fr) minmax(19rem, 0.72fr);
     align-items: start;

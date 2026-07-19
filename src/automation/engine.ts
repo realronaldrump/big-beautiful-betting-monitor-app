@@ -86,6 +86,7 @@ function selectCandidate(
   balances: AccountBalances,
   balanceFloor: number,
   triggerPrice: number,
+  executionCap: number,
   alreadyBet: boolean,
   preferredSide?: CandidateSide,
 ): Candidate | null {
@@ -119,6 +120,7 @@ function selectCandidate(
       buyingPower: balances.buyingPower,
       balanceFloor,
       triggerPrice,
+      executionCap,
       isLive: market.isLive,
       isOpen: isMarketOpen(quote, market),
       alreadyBet,
@@ -132,12 +134,13 @@ function selectCandidate(
 function buildOrder(
   market: TrackedMarket,
   candidate: Candidate,
+  executionCap: number,
 ): CreateOrderParams | null {
   const tick = market.priceTickSize || 0.01;
   const underlyingLimit =
     candidate.side === "long"
-      ? alignDown(0.96, tick)
-      : alignUp(1 - 0.96, tick);
+      ? alignDown(executionCap, tick)
+      : alignUp(1 - executionCap, tick);
   const effectiveOutcomeLimit =
     candidate.side === "long" ? underlyingLimit : 1 - underlyingLimit;
   const minimumTradeQty = market.minimumTradeQty || 0.01;
@@ -250,13 +253,14 @@ export class AutomationEngine {
           balances,
           config.balanceFloor,
           config.triggerPrice,
+          config.executionCap,
           alreadyBet,
           preferredSide,
         );
         if (!candidate) return "ignored";
         preferredSide = candidate.side;
 
-        const order = buildOrder(market, candidate);
+        const order = buildOrder(market, candidate, config.executionCap);
         if (!order) return "ignored";
 
         const attempt = this.store.beginAttempt({
@@ -285,10 +289,22 @@ export class AutomationEngine {
           continue;
         }
 
-        if (!this.store.getConfig().enabled) {
+        const latestConfig = this.store.getConfig();
+        if (!latestConfig.enabled) {
           this.store.markExplicitRejection(
             market.marketSlug,
             "Automation was switched off before submission",
+          );
+          return "ignored";
+        }
+        if (
+          latestConfig.balanceFloor !== config.balanceFloor ||
+          latestConfig.triggerPrice !== config.triggerPrice ||
+          latestConfig.executionCap !== config.executionCap
+        ) {
+          this.store.deferAttempt(
+            market.marketSlug,
+            "Automation settings changed before submission",
           );
           return "ignored";
         }

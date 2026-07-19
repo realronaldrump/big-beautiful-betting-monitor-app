@@ -60,30 +60,33 @@ describe("AutomationStore", () => {
     store.close();
   });
 
-  it("persists the master switch, balance floor, and trigger with safe defaults", () => {
+  it("persists the master switch, balance floor, trigger, and cap with safe defaults", () => {
     const store = makeStore();
 
     expect(store.getConfig()).toMatchObject({
       enabled: false,
       balanceFloor: 100,
       triggerPrice: 0.95,
+      executionCap: 0.96,
     });
     expect(
       store.updateConfig({
         enabled: true,
         balanceFloor: 42.5,
         triggerPrice: 0.9,
+        executionCap: 0.92,
       }),
     ).toMatchObject({
       enabled: true,
       balanceFloor: 42.5,
       triggerPrice: 0.9,
+      executionCap: 0.92,
     });
 
     store.close();
   });
 
-  it("adds the 95-cent default without resetting an existing armed database", () => {
+  it("adds the price defaults without resetting an existing armed database", () => {
     const directory = mkdtempSync(path.join(tmpdir(), "bbbm-automation-legacy-"));
     testDirectories.push(directory);
     const databasePath = path.join(directory, "automation.sqlite");
@@ -106,6 +109,39 @@ describe("AutomationStore", () => {
       enabled: true,
       balanceFloor: 88,
       triggerPrice: 0.95,
+      executionCap: 0.96,
+    });
+
+    store.close();
+  });
+
+  it("adds the cap default without changing current persisted settings", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "bbbm-automation-current-"));
+    testDirectories.push(directory);
+    const databasePath = path.join(directory, "automation.sqlite");
+    const currentDatabase = new Database(databasePath);
+    currentDatabase.exec(`
+      CREATE TABLE automation_config (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+        balance_floor REAL NOT NULL DEFAULT 100 CHECK (balance_floor >= 0),
+        trigger_price REAL NOT NULL DEFAULT 0.95
+          CHECK (trigger_price >= 0.01 AND trigger_price <= 0.96),
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO automation_config
+        (id, enabled, balance_floor, trigger_price, updated_at)
+      VALUES (1, 1, 88, 0.91, '2026-01-01T00:00:00.000Z');
+    `);
+    currentDatabase.close();
+
+    const store = new AutomationStore(databasePath);
+
+    expect(store.getConfig()).toMatchObject({
+      enabled: true,
+      balanceFloor: 88,
+      triggerPrice: 0.91,
+      executionCap: 0.96,
     });
 
     store.close();

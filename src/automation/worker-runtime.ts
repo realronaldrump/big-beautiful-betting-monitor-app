@@ -15,7 +15,6 @@ import {
   PolymarketTradingAdapter,
 } from "@/automation/polymarket-adapter";
 import { getAutomationStore, type AutomationStore } from "@/automation/store";
-import { AUTOMATION_RULES } from "@/automation/strategy";
 import {
   extractAccountBalances,
   extractOrderExecution,
@@ -359,7 +358,7 @@ export class AutomationWorker {
     const longQualifies =
       quote.bestAsk !== undefined &&
       quote.bestAsk >= config.triggerPrice &&
-      quote.bestAsk <= AUTOMATION_RULES.maxPrice;
+      quote.bestAsk <= config.executionCap;
     const shortPrice =
       quote.bestBid === undefined
         ? undefined
@@ -367,7 +366,7 @@ export class AutomationWorker {
     const shortQualifies =
       shortPrice !== undefined &&
       shortPrice >= config.triggerPrice &&
-      shortPrice <= AUTOMATION_RULES.maxPrice;
+      shortPrice <= config.executionCap;
     if (!longQualifies && !shortQualifies) return;
 
     const previous = this.store.getAttempt(marketSlug);
