@@ -25,6 +25,7 @@ const LOOP_INTERVAL_MS = 1_000;
 const ERROR_RETRY_MS = 15_000;
 const INITIAL_RATE_LIMIT_RETRY_MS = 60_000;
 const MAX_RATE_LIMIT_RETRY_MS = 5 * 60_000;
+const RATE_LIMIT_RECOVERY_MS = 10 * 60_000;
 const MAX_MARKETS_PER_SUBSCRIPTION = 100;
 const MAX_LIVE_EVENT_PAGES = 10;
 
@@ -68,7 +69,7 @@ export function retryPlan(error: unknown, currentRateLimitDelayMs: number) {
   if (!isRateLimitError(error)) {
     return {
       delayMs: ERROR_RETRY_MS,
-      nextRateLimitDelayMs: INITIAL_RATE_LIMIT_RETRY_MS,
+      nextRateLimitDelayMs: currentRateLimitDelayMs,
     };
   }
   return {
@@ -78,6 +79,15 @@ export function retryPlan(error: unknown, currentRateLimitDelayMs: number) {
       MAX_RATE_LIMIT_RETRY_MS,
     ),
   };
+}
+
+export function hasSustainedRateLimitRecovery(
+  lastRateLimitAt: number | null,
+  now: number,
+) {
+  return (
+    lastRateLimitAt !== null && now - lastRateLimitAt >= RATE_LIMIT_RECOVERY_MS
+  );
 }
 
 function publicWorkerError(error: unknown) {
@@ -104,6 +114,7 @@ export class AutomationWorker {
   private lastBalanceAt = 0;
   private lastPrivateAttemptAt = 0;
   private rateLimitRetryMs = INITIAL_RATE_LIMIT_RETRY_MS;
+  private lastRateLimitAt: number | null = null;
   private shuttingDown = false;
   private qualifiedQuoteQueue: Promise<void> = Promise.resolve();
 
@@ -186,8 +197,13 @@ export class AutomationWorker {
           stopReason: null,
           monitoredMarkets: this.trackedMarkets.size,
         });
-        this.rateLimitRetryMs = INITIAL_RATE_LIMIT_RETRY_MS;
+        const now = Date.now();
+        if (hasSustainedRateLimitRecovery(this.lastRateLimitAt, now)) {
+          this.rateLimitRetryMs = INITIAL_RATE_LIMIT_RETRY_MS;
+          this.lastRateLimitAt = null;
+        }
       } catch (error) {
+        if (isRateLimitError(error)) this.lastRateLimitAt = Date.now();
         const retry = retryPlan(error, this.rateLimitRetryMs);
         this.rateLimitRetryMs = retry.nextRateLimitDelayMs;
         this.closeMarketSocket();

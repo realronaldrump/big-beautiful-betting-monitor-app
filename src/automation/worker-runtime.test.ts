@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isRateLimitError, retryPlan } from "./worker-runtime";
+import {
+  hasSustainedRateLimitRecovery,
+  isRateLimitError,
+  retryPlan,
+} from "./worker-runtime";
 
 describe("automation worker rate-limit backoff", () => {
   it("recognizes SDK and Cloudflare rate-limit errors", () => {
@@ -25,10 +29,18 @@ describe("automation worker rate-limit backoff", () => {
     });
   });
 
-  it("uses the normal retry delay and resets backoff for unrelated errors", () => {
+  it("uses the normal retry delay without discarding accumulated backoff", () => {
     expect(retryPlan(new Error("Temporary connection failure"), 240_000)).toEqual({
       delayMs: 15_000,
-      nextRateLimitDelayMs: 60_000,
+      nextRateLimitDelayMs: 240_000,
     });
+  });
+
+  it("resets accumulated backoff only after ten clean minutes", () => {
+    const lastRateLimitAt = 1_000;
+
+    expect(hasSustainedRateLimitRecovery(lastRateLimitAt, 600_999)).toBe(false);
+    expect(hasSustainedRateLimitRecovery(lastRateLimitAt, 601_000)).toBe(true);
+    expect(hasSustainedRateLimitRecovery(null, 601_000)).toBe(false);
   });
 });
