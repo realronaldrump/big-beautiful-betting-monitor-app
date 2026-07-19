@@ -72,4 +72,38 @@ describe("extractLiveMarkets", () => {
       },
     ]);
   });
+
+  it("excludes esports events before their markets are tracked", () => {
+    const markets = extractLiveMarkets({
+      events: [
+        {
+          slug: "valorant-team-one-v-team-two",
+          title: "Team One vs. Team Two",
+          live: true,
+          active: true,
+          closed: false,
+          tags: [
+            {
+              slug: "esports",
+              sport: { slug: "esports" },
+            },
+          ],
+          markets: [
+            {
+              slug: "valorant-team-one-win",
+              active: true,
+              closed: false,
+              ep3Status: "OPEN",
+              marketSides: [
+                { description: "Team One", long: true, tradable: true },
+                { description: "Team Two", long: false, tradable: true },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(markets).toEqual([]);
+  });
 });

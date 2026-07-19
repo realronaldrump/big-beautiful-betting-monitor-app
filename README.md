@@ -40,7 +40,7 @@ Automation is **off by default**. Turn it on from the Auto-bet panel only when y
 
 The strategy is:
 
-- Live sports events only
+- Live non-esports sports events only
 - A configurable whole-cent trigger from 1¢ through 96¢ (95¢ by default) that cannot exceed the execution cap
 - A configurable whole-cent execution cap from 1¢ through 99¢ (96¢ by default); the trigger cannot exceed it
 - Up to $1 of contract value per order, aligned to each market's quantity increment

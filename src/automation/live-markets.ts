@@ -19,6 +19,13 @@ interface RawLiveMarket {
   marketSides?: RawMarketSide[];
 }
 
+interface RawEventTag {
+  slug?: string;
+  sport?: {
+    slug?: string;
+  };
+}
+
 interface RawLiveEvent {
   slug?: string;
   title?: string;
@@ -28,6 +35,7 @@ interface RawLiveEvent {
   closed?: boolean;
   hidden?: boolean;
   markets?: RawLiveMarket[];
+  tags?: RawEventTag[];
 }
 
 export interface RawLiveEventsResponse {
@@ -46,7 +54,10 @@ export function extractLiveMarkets(
       event.ended === true ||
       event.active === false ||
       event.closed === true ||
-      event.hidden === true
+      event.hidden === true ||
+      event.tags?.some(
+        (tag) => tag.slug === "esports" || tag.sport?.slug === "esports",
+      )
     ) {
       continue;
     }
