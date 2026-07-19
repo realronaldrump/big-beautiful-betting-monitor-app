@@ -115,6 +115,7 @@ export class AutomationWorker {
   private lastPrivateAttemptAt = 0;
   private rateLimitRetryMs = INITIAL_RATE_LIMIT_RETRY_MS;
   private lastRateLimitAt: number | null = null;
+  private pendingRateLimitError: unknown | null = null;
   private shuttingDown = false;
   private qualifiedQuoteQueue: Promise<void> = Promise.resolve();
 
@@ -139,6 +140,9 @@ export class AutomationWorker {
 
       if (!config.enabled) {
         this.closeSockets();
+        this.pendingRateLimitError = null;
+        this.rateLimitRetryMs = INITIAL_RATE_LIMIT_RETRY_MS;
+        this.lastRateLimitAt = null;
         this.store.updateRuntime({
           state: "off",
           heartbeatAt,
@@ -152,6 +156,7 @@ export class AutomationWorker {
       }
 
       try {
+        this.throwPendingRateLimitError();
         await this.tryPrivateSocket();
 
         if (Date.now() - this.lastBalanceAt >= BALANCE_INTERVAL_MS) {
@@ -203,10 +208,12 @@ export class AutomationWorker {
           this.lastRateLimitAt = null;
         }
       } catch (error) {
-        if (isRateLimitError(error)) this.lastRateLimitAt = Date.now();
+        const rateLimited = isRateLimitError(error);
+        if (rateLimited) this.lastRateLimitAt = Date.now();
         const retry = retryPlan(error, this.rateLimitRetryMs);
         this.rateLimitRetryMs = retry.nextRateLimitDelayMs;
-        this.closeMarketSocket();
+        if (rateLimited) this.closeSockets();
+        else this.closeMarketSocket();
         this.store.updateRuntime({
           state: "error",
           heartbeatAt,
@@ -274,7 +281,7 @@ export class AutomationWorker {
     socket.on("marketDataLite", (message) => this.enqueueQuote(message));
     socket.on("error", (error) => {
       if (this.shuttingDown) return;
-      this.store.updateRuntime({ lastError: publicWorkerError(error) });
+      this.handleAsyncWorkerError(error);
     });
     socket.on("close", () => {
       if (this.marketSocket === socket) this.marketSocket = null;
@@ -333,7 +340,7 @@ export class AutomationWorker {
       })
       .catch((error) => {
         if (this.shuttingDown) return;
-        this.store.updateRuntime({ lastError: publicWorkerError(error) });
+        this.handleAsyncWorkerError(error);
       });
   }
 
@@ -346,7 +353,7 @@ export class AutomationWorker {
     socket.on("orderUpdate", (message) => this.handleOrderUpdate(message));
     socket.on("error", (error) => {
       if (this.shuttingDown) return;
-      this.store.updateRuntime({ lastError: publicWorkerError(error) });
+      this.handleAsyncWorkerError(error);
     });
     socket.on("close", () => {
       if (this.privateSocket === socket) this.privateSocket = null;
@@ -367,8 +374,24 @@ export class AutomationWorker {
     } catch (error) {
       this.privateSocket?.close();
       this.privateSocket = null;
+      if (isRateLimitError(error)) throw error;
       this.store.updateRuntime({ lastError: publicWorkerError(error) });
     }
+  }
+
+  private handleAsyncWorkerError(error: unknown) {
+    if (isRateLimitError(error)) {
+      this.pendingRateLimitError = error;
+      return;
+    }
+    this.store.updateRuntime({ lastError: publicWorkerError(error) });
+  }
+
+  private throwPendingRateLimitError() {
+    if (this.pendingRateLimitError === null) return;
+    const error = this.pendingRateLimitError;
+    this.pendingRateLimitError = null;
+    throw error;
   }
 
   private handleOrderUpdate(message: unknown) {
