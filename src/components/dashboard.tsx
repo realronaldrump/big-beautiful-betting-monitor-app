@@ -251,7 +251,11 @@ export function Dashboard({
         </div>
 
         <div className="hero-grid rise" style={reveal(2)}>
-          <PnlHero summary={summary} history={snapshot.pnlHistory} />
+          <PnlHero
+            summary={summary}
+            history={snapshot.pnlHistory}
+            asOf={snapshot.generatedAt}
+          />
           <Scoreboard
             history={snapshot.pnlHistory}
             asOf={snapshot.generatedAt}

@@ -2,6 +2,17 @@ import type { PnlPoint } from "@/lib/dashboard-types";
 
 export type RecordRange = "1h" | "24h" | "7d" | "30d" | "all";
 
+export const RECORD_RANGE_OPTIONS: ReadonlyArray<{
+  value: RecordRange;
+  label: string;
+}> = [
+  { value: "1h", label: "1H" },
+  { value: "24h", label: "24H" },
+  { value: "7d", label: "7D" },
+  { value: "30d", label: "30D" },
+  { value: "all", label: "All" },
+];
+
 export interface RecordStats {
   wins: number;
   losses: number;

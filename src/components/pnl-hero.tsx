@@ -1,24 +1,60 @@
+"use client";
+
+import { useMemo, useState } from "react";
 import { AnimatedNumber } from "@/components/animated-number";
 import { Sparkline } from "@/components/sparkline";
 import type { DashboardSummary, PnlPoint } from "@/lib/dashboard-types";
 import { formatCurrency, formatPercent } from "@/lib/format";
-import { returnOnDeposits } from "@/lib/insights";
+import { computePnlRange } from "@/lib/pnl-range";
+import {
+  RECORD_RANGE_OPTIONS,
+  type RecordRange,
+} from "@/lib/record-range";
 
 interface PnlHeroProps {
   summary: DashboardSummary;
   history: PnlPoint[];
+  asOf: string;
 }
 
-export function PnlHero({ summary, history }: PnlHeroProps) {
-  const total = summary.estimatedTotalPnl;
-  const roi = returnOnDeposits(summary);
+export function PnlHero({ summary, history, asOf }: PnlHeroProps) {
+  const [range, setRange] = useState<RecordRange>("all");
+  const selected = useMemo(
+    () => computePnlRange(history, range, asOf),
+    [asOf, history, range],
+  );
+  const total = selected.realizedPnl + summary.estimatedOpenPnl;
+  const roi = summary.deposits > 0 ? (total / summary.deposits) * 100 : null;
   const trend = total >= 0 ? "up" : "down";
 
   return (
     <section className="hero panel" aria-label="Total profit and loss">
       <header className="hero__head">
-        <h2 className="panel-title">Total profit/loss</h2>
-        <p className="panel-sub">finished bets + open bets if sold now</p>
+        <div>
+          <h2 className="panel-title">Total profit/loss</h2>
+          <p className="panel-sub">
+            finished bets{range === "all" ? "" : " in range"} + open bets
+            if sold now
+          </p>
+        </div>
+        <div className="hero__range-scroll">
+          <div
+            className="range-toggle hero__range"
+            role="group"
+            aria-label="Total profit and loss date range"
+          >
+            {RECORD_RANGE_OPTIONS.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                aria-pressed={range === option.value}
+                onClick={() => setRange(option.value)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
       </header>
 
       <AnimatedNumber
@@ -30,10 +66,12 @@ export function PnlHero({ summary, history }: PnlHeroProps) {
 
       <div className="hero__chips">
         <span className="chip">
-          Finished bets
+          Finished bets{range === "all" ? "" : " in range"}
           <AnimatedNumber
-            className={summary.realizedPnl >= 0 ? "is-positive" : "is-negative"}
-            value={summary.realizedPnl}
+            className={
+              selected.realizedPnl >= 0 ? "is-positive" : "is-negative"
+            }
+            value={selected.realizedPnl}
             format={(value) => formatCurrency(value, true)}
           />
         </span>
@@ -62,7 +100,7 @@ export function PnlHero({ summary, history }: PnlHeroProps) {
       </div>
 
       <div className={`hero__spark hero__spark--${trend}`}>
-        <Sparkline points={history} id="hero-spark" />
+        <Sparkline points={selected.history} id="hero-spark" />
       </div>
     </section>
   );

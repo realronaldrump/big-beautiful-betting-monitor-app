@@ -6,6 +6,7 @@ import { formatPercent } from "@/lib/format";
 import { computeForm, computeStreak } from "@/lib/insights";
 import {
   computeRecordStats,
+  RECORD_RANGE_OPTIONS,
   selectRecordRange,
   type RecordRange,
 } from "@/lib/record-range";
@@ -14,14 +15,6 @@ interface ScoreboardProps {
   history: PnlPoint[];
   asOf: string;
 }
-
-const RECORD_RANGES: Array<{ value: RecordRange; label: string }> = [
-  { value: "1h", label: "1H" },
-  { value: "24h", label: "24H" },
-  { value: "7d", label: "7D" },
-  { value: "30d", label: "30D" },
-  { value: "all", label: "All" },
-];
 
 const RADIUS = 54;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
@@ -57,7 +50,7 @@ export function Scoreboard({ history, asOf }: ScoreboardProps) {
         </div>
         <div className="scoreboard__range-scroll">
           <div className="range-toggle scoreboard__range" role="group" aria-label="Record date range">
-            {RECORD_RANGES.map((option) => (
+            {RECORD_RANGE_OPTIONS.map((option) => (
               <button
                 key={option.value}
                 type="button"
