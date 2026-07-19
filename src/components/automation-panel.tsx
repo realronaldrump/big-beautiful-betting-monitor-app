@@ -91,6 +91,12 @@ export function AutomationPanel({
     ? Number(triggerInput)
     : Number.NaN;
   const parsedTriggerPrice = parsedTriggerCents / 100;
+  const floorFieldDirty =
+    !Number.isFinite(parsedFloor) ||
+    Math.abs(parsedFloor - snapshot.config.balanceFloor) >= 0.001;
+  const triggerFieldDirty =
+    !Number.isFinite(parsedTriggerPrice) ||
+    Math.abs(parsedTriggerPrice - snapshot.config.triggerPrice) >= 0.000001;
   const maxTriggerCents = Math.round(snapshot.rules.maxPrice * 100);
 
   const refresh = useCallback(async () => {
@@ -159,10 +165,19 @@ export function AutomationPanel({
     return confirmed;
   }, []);
 
-  function markDraftChanged() {
-    draftDirtyRef.current = true;
-    setIsDirty(true);
-    setConfirmation(null);
+  function markDraftChanged(nextFloor: string, nextTrigger: string) {
+    const floor = nextFloor.trim() ? Number(nextFloor) : Number.NaN;
+    const triggerCents = nextTrigger.trim()
+      ? Number(nextTrigger)
+      : Number.NaN;
+    const dirty =
+      !Number.isFinite(floor) ||
+      !Number.isFinite(triggerCents) ||
+      Math.abs(floor - snapshot.config.balanceFloor) >= 0.001 ||
+      Math.abs(triggerCents / 100 - snapshot.config.triggerPrice) >= 0.000001;
+    draftDirtyRef.current = dirty;
+    setIsDirty(dirty);
+    if (dirty) setConfirmation(null);
     setSettingsError("");
   }
 
@@ -332,11 +347,11 @@ export function AutomationPanel({
                   inputMode="numeric"
                   value={triggerInput}
                   disabled={isSaving}
-                  data-dirty={isDirty || undefined}
+                  data-dirty={triggerFieldDirty || undefined}
                   aria-describedby="trigger-price-note"
                   onChange={(event) => {
                     setTriggerInput(event.target.value);
-                    markDraftChanged();
+                    markDraftChanged(floorInput, event.target.value);
                   }}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") {
@@ -365,10 +380,10 @@ export function AutomationPanel({
                   inputMode="decimal"
                   value={floorInput}
                   disabled={isSaving}
-                  data-dirty={isDirty || undefined}
+                  data-dirty={floorFieldDirty || undefined}
                   onChange={(event) => {
                     setFloorInput(event.target.value);
-                    markDraftChanged();
+                    markDraftChanged(event.target.value, triggerInput);
                   }}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") {
