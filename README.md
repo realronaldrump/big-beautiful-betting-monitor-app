@@ -98,6 +98,7 @@ Polymarket's authenticated REST limit is 20 requests per second per API key. The
 - Source of truth: `main` on `realronaldrump/big-beautiful-betting-monitor-app`
 - Runtime: Docker on `davis-mini-pc-1` (`100.96.182.111`)
 - Tailnet URL: `https://davis-mini-pc-1.tail59b3f5.ts.net/betting/`
+- Route: Tailscale Serve → Caddy → mini-portal streaming proxy → `127.0.0.1:8720`
 - Container image: `ghcr.io/realronaldrump/big-beautiful-betting-monitor-app:main`
 - Compose file: `deploy/compose.yaml`
 - Secrets: `/home/davis/.config/betting-monitor/betting-monitor.env` on the mini PC only
@@ -114,6 +115,8 @@ git pull --ff-only origin main
 docker compose -f deploy/compose.yaml pull
 docker compose -f deploy/compose.yaml up -d
 ```
+
+See `deploy/README.md` for health checks, route details, storage locations, and recovery notes.
 
 ## Commands
 
