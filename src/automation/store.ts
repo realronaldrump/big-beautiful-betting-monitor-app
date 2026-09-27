@@ -297,6 +297,16 @@ export class AutomationStore {
       );
     }
 
+    // Materialize added REAL defaults once. Older host SQLite integrity checks
+    // misread virtual REAL defaults on pre-migration records as NULL even though
+    // normal reads (and current SQLite checks) return the correct value.
+    if (Number(this.db.pragma("user_version", { simple: true })) < 1) {
+      this.db.exec(
+        "UPDATE automation_attempts SET reserved_debit = COALESCE(reserved_debit, 1.10)",
+      );
+      this.db.pragma("user_version = 1");
+    }
+
     this.db
       .prepare(
         `INSERT OR IGNORE INTO automation_config

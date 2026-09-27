@@ -46,3 +46,7 @@ Legacy attempts with no exchange ID cannot be proven filled or rejected using an
 Verified the local combined dev command with empty credentials and a separate SQLite path. Desktop and 390px mobile checks covered typo search, result filtering, amount ranges, sorting, expanded histories, empty time ranges, settings normalization/read-back, and CSV export. The exported file contained only the filtered rows. Console checks showed no errors. The local server was stopped after verification.
 
 The automated suite covers transport signing/pacing/dispatch, worker lifecycle, CAS settings, account/fee calculations, snapshot cache freshness, UI recovery, search/operators/sorting/export, and chart windows.
+
+## Host SQLite compatibility
+
+The application uses SQLite 3.53, while the mini-PC Python maintenance tools use 3.45. The older integrity checker reports a false NULL constraint violation for an unmaterialized REAL default added to existing records. A minimal fixture reproduced this on the host despite ordinary reads finding zero NULL values; explicitly updating the field to its own value cleared the warning. Migration version 1 writes the reserve defaults into existing rows once, without changing their values or any settings/history. Regression coverage verifies both record preservation and one-time execution.

@@ -189,3 +189,45 @@ it("allows a current settings edit without changing the master switch", () => {
   });
   store.close();
 });
+
+it("materializes reserve defaults once when upgrading existing attempts", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "bbbm-materialize-"));
+  const file = path.join(directory, "state.sqlite");
+  try {
+    const seed = new AutomationStore(file);
+    seed.beginAttempt({
+      marketSlug: "existing",
+      eventSlug: "event",
+      title: "Existing",
+      outcome: "Yes",
+      triggerPrice: 0.95,
+    });
+    seed.close();
+    const old = new Database(file);
+    old.exec(`ALTER TABLE automation_attempts DROP COLUMN reserved_debit;
+      ALTER TABLE automation_attempts ADD COLUMN reserved_debit REAL NOT NULL DEFAULT 1.10;
+      CREATE TABLE migration_updates (count INTEGER);
+      INSERT INTO migration_updates VALUES (0);
+      CREATE TRIGGER count_reserve_materialization AFTER UPDATE OF reserved_debit ON automation_attempts
+        BEGIN UPDATE migration_updates SET count = count + 1; END;
+      PRAGMA user_version = 0;`);
+    old.close();
+    const upgraded = new AutomationStore(file);
+    expect(upgraded.getAttempt("existing")).toMatchObject({
+      reservedDebit: 1.1,
+      title: "Existing",
+      status: "submitting",
+    });
+    upgraded.close();
+    const reopened = new AutomationStore(file);
+    reopened.close();
+    const read = new Database(file, { readonly: true });
+    expect(read.prepare("SELECT count FROM migration_updates").get()).toEqual({
+      count: 1,
+    });
+    expect(read.pragma("quick_check", { simple: true })).toBe("ok");
+    read.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
