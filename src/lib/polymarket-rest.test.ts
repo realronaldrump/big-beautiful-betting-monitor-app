@@ -127,3 +127,21 @@ it("blocks a real transport dispatch when Off was saved while queued", async () 
   });
   store.close();
 });
+
+it("preserves Cloudflare throttling classification without exposing HTML", async () => {
+  const client = new PolymarketRestClient(
+    new ApiPacer(0),
+    { keyId: "test", secret },
+    async () =>
+      new Response("<html>Error 1015: You are being rate limited</html>", {
+        status: 403,
+        statusText: "Forbidden",
+      }),
+  );
+  await expect(
+    client.request("/v1/order/preview", { method: "POST", body: {} }),
+  ).rejects.toMatchObject({
+    status: 429,
+    message: "Polymarket is rate-limiting requests.",
+  });
+});

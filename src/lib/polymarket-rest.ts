@@ -151,6 +151,17 @@ export class PolymarketRestClient {
         });
         const text = await response.text();
         if (!response.ok) {
+          // Cloudflare can return a throttling page with HTTP 403 rather than 429.
+          // Preserve its classification without sending proxy HTML to the UI.
+          if (
+            response.status === 403 &&
+            /error(?:\s*code)?\s*:?\s*1015|being rate limited/i.test(text)
+          ) {
+            throw new PolymarketRequestError(
+              429,
+              "Polymarket is rate-limiting requests.",
+            );
+          }
           let message = response.statusText;
           try {
             const error = JSON.parse(text);
