@@ -7,6 +7,7 @@ export type ActivityView = "all" | "markets" | "cash";
 interface ActivityFeedProps {
   activities: ActivityRow[];
   view: ActivityView;
+  limit?: number;
 }
 
 const KIND_GLYPHS: Record<ActivityKind, string> = {
@@ -22,10 +23,14 @@ function kindMatchesView(kind: ActivityKind, view: ActivityView): boolean {
   return kind === "trade" || kind === "settlement";
 }
 
-export function ActivityFeed({ activities, view }: ActivityFeedProps) {
+export function ActivityFeed({
+  activities,
+  view,
+  limit = 12,
+}: ActivityFeedProps) {
   const visibleActivities = activities
     .filter((activity) => kindMatchesView(activity.kind, view))
-    .slice(0, 12);
+    .slice(0, limit);
 
   if (!visibleActivities.length) {
     return (
@@ -42,7 +47,9 @@ export function ActivityFeed({ activities, view }: ActivityFeedProps) {
     <ol className="feed">
       {visibleActivities.map((activity, index) => {
         const displayAmount =
-          activity.kind === "settlement" ? activity.realizedPnl : activity.amount;
+          activity.kind === "settlement"
+            ? activity.realizedPnl
+            : activity.amount;
         const isTradeNotional = activity.kind === "trade";
         return (
           <li
@@ -58,7 +65,9 @@ export function ActivityFeed({ activities, view }: ActivityFeedProps) {
             </span>
             <div className="feed__copy">
               <p className="feed__kicker">
-                {activity.type.replace("ACTIVITY_TYPE_", "").replaceAll("_", " ")}
+                {activity.type
+                  .replace("ACTIVITY_TYPE_", "")
+                  .replaceAll("_", " ")}
               </p>
               <h3>{activity.label}</h3>
               <p className="feed__detail">{activity.detail}</p>
@@ -80,7 +89,7 @@ export function ActivityFeed({ activities, view }: ActivityFeedProps) {
                 <strong>—</strong>
               )}
               <time dateTime={activity.occurredAt}>
-                {formatDate(activity.occurredAt)}
+                {formatDate(activity.occurredAt, true)}
               </time>
             </div>
           </li>

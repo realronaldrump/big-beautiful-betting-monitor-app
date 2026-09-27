@@ -47,13 +47,21 @@ describe("AutomationStore", () => {
     };
 
     expect(store.beginAttempt(market)?.attempts).toBe(1);
-    expect(store.markExplicitRejection(market.marketSlug, "rejected")).toBe(true);
+    expect(store.markExplicitRejection(market.marketSlug, "rejected")).toBe(
+      true,
+    );
     expect(store.beginAttempt(market)?.attempts).toBe(2);
-    expect(store.markExplicitRejection(market.marketSlug, "rejected")).toBe(true);
+    expect(store.markExplicitRejection(market.marketSlug, "rejected")).toBe(
+      true,
+    );
     expect(store.beginAttempt(market)?.attempts).toBe(3);
-    expect(store.markExplicitRejection(market.marketSlug, "rejected")).toBe(true);
+    expect(store.markExplicitRejection(market.marketSlug, "rejected")).toBe(
+      true,
+    );
     expect(store.beginAttempt(market)?.attempts).toBe(4);
-    expect(store.markExplicitRejection(market.marketSlug, "rejected")).toBe(false);
+    expect(store.markExplicitRejection(market.marketSlug, "rejected")).toBe(
+      false,
+    );
     expect(store.beginAttempt(market)).toBeNull();
     expect(store.getAttempt(market.marketSlug)?.status).toBe("exhausted");
 
@@ -87,7 +95,9 @@ describe("AutomationStore", () => {
   });
 
   it("adds the price defaults without resetting an existing armed database", () => {
-    const directory = mkdtempSync(path.join(tmpdir(), "bbbm-automation-legacy-"));
+    const directory = mkdtempSync(
+      path.join(tmpdir(), "bbbm-automation-legacy-"),
+    );
     testDirectories.push(directory);
     const databasePath = path.join(directory, "automation.sqlite");
     const legacyDatabase = new Database(databasePath);
@@ -116,7 +126,9 @@ describe("AutomationStore", () => {
   });
 
   it("adds the cap default without changing current persisted settings", () => {
-    const directory = mkdtempSync(path.join(tmpdir(), "bbbm-automation-current-"));
+    const directory = mkdtempSync(
+      path.join(tmpdir(), "bbbm-automation-current-"),
+    );
     testDirectories.push(directory);
     const databasePath = path.join(directory, "automation.sqlite");
     const currentDatabase = new Database(databasePath);
@@ -146,4 +158,34 @@ describe("AutomationStore", () => {
 
     store.close();
   });
+});
+
+it("rejects stale settings edits after Off without re-enabling", () => {
+  const store = new AutomationStore(":memory:");
+  const before = store.updateConfig({
+    enabled: true,
+    balanceFloor: 100,
+    triggerPrice: 0.95,
+    executionCap: 0.96,
+  });
+  store.setEnabled(false);
+  expect(() =>
+    store.updateSettings({ ...before, balanceFloor: 150 }, before.revision),
+  ).toThrow("another tab");
+  expect(store.getConfig()).toMatchObject({
+    enabled: false,
+    balanceFloor: 100,
+  });
+  store.close();
+});
+it("allows a current settings edit without changing the master switch", () => {
+  const store = new AutomationStore(":memory:");
+  const before = store.getConfig();
+  store.updateSettings({ ...before, balanceFloor: 120 }, before.revision);
+  expect(store.getConfig()).toMatchObject({
+    enabled: false,
+    balanceFloor: 120,
+    revision: before.revision + 1,
+  });
+  store.close();
 });

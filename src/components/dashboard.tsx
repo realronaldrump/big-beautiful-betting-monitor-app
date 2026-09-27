@@ -1,84 +1,51 @@
 "use client";
 
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from "react";
-import type { CSSProperties } from "react";
-import { ActivityFeed, type ActivityView } from "@/components/activity-feed";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { AutomationPanel } from "@/components/automation-panel";
+import { BetsExplorer } from "@/components/positions-table";
+import { ActivityExplorer } from "@/components/activity-explorer";
 import { CashFlow } from "@/components/cash-flow";
 import { EdgePanel } from "@/components/edge-panel";
 import { MetricCard } from "@/components/metric-card";
 import { PnlChart } from "@/components/pnl-chart";
 import { PnlHero } from "@/components/pnl-hero";
-import {
-  PositionsTable,
-  type PositionView,
-} from "@/components/positions-table";
 import { Scoreboard } from "@/components/scoreboard";
 import { SetupBanner } from "@/components/setup-banner";
-import { TickerTape } from "@/components/ticker-tape";
 import type { DashboardSnapshot } from "@/lib/dashboard-types";
 import type { AutomationSnapshot } from "@/automation/store";
-import { formatCurrency, formatDate, formatNumber } from "@/lib/format";
+import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
 import { computeOpenBook } from "@/lib/insights";
 import { appPath } from "@/lib/app-path";
+import { createRefreshQueue } from "@/lib/refresh-queue";
 
 interface DashboardProps {
-  initialSnapshot: DashboardSnapshot;
+  initialSnapshot: DashboardSnapshot | null;
   initialAutomation: AutomationSnapshot;
   initialError?: string;
 }
-
+type View = "bets" | "performance" | "activity";
 type SyncState = "demo" | "connecting" | "live" | "reconnecting";
-
-const positionViews: PositionView[] = ["all", "open", "closed"];
-const activityViews: ActivityView[] = ["all", "markets", "cash"];
-const positionViewLabels: Record<PositionView, string> = {
-  all: "All",
-  open: "Open",
-  closed: "Finished",
-};
-const activityViewLabels: Record<ActivityView, string> = {
-  all: "All",
-  markets: "Bets",
-  cash: "Cash",
-};
-const FALLBACK_REFRESH_MS = 15_000;
-const RECONCILE_REFRESH_MS = 60_000;
-
 const clockFormat = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Denver",
   hour: "2-digit",
   minute: "2-digit",
-  second: "2-digit",
   hour12: false,
 });
-
-function subscribeToClock(onTick: () => void) {
+function subscribeClock(onTick: () => void) {
   const timer = setInterval(onTick, 1000);
   return () => clearInterval(timer);
 }
-
 function LiveClock() {
   const now = useSyncExternalStore(
-    subscribeToClock,
+    subscribeClock,
     () => clockFormat.format(new Date()),
-    () => "--:--:--",
+    () => "--:--",
   );
-
   return (
     <span className="clock" aria-hidden="true">
-      {now}
+      {now} MT
     </span>
   );
-}
-
-function reveal(order: number): CSSProperties {
-  return { "--reveal": order } as CSSProperties;
 }
 
 export function Dashboard({
@@ -87,66 +54,86 @@ export function Dashboard({
   initialError = "",
 }: DashboardProps) {
   const [snapshot, setSnapshot] = useState(initialSnapshot);
-  const [positionView, setPositionView] = useState<PositionView>("all");
-  const [activityView, setActivityView] = useState<ActivityView>("all");
-  const [query, setQuery] = useState("");
+  const [view, setView] = useState<View>("bets");
+  const [performanceOpened, setPerformanceOpened] = useState(false);
   const [syncState, setSyncState] = useState<SyncState>(
-    initialSnapshot.mode === "live" ? "connecting" : "demo",
+    initialSnapshot?.mode === "demo" ? "demo" : "connecting",
   );
   const [isSyncing, setIsSyncing] = useState(false);
   const [error, setError] = useState(initialError);
-  const requestInFlight = useRef(false);
-  const { summary } = snapshot;
-
-  const updateSnapshot = useCallback(async () => {
-    if (requestInFlight.current) return;
-    requestInFlight.current = true;
-    setIsSyncing(true);
-
-    try {
-      const response = await fetch(appPath("/api/portfolio"), {
-        cache: "no-store",
-      });
-      const payload = (await response.json()) as DashboardSnapshot | { error?: string };
-      if (!response.ok || !("summary" in payload)) {
-        throw new Error("error" in payload ? payload.error : "Account data could not be updated.");
-      }
-      setSnapshot(payload);
-      setError("");
-    } catch (updateError) {
-      setError(updateError instanceof Error ? updateError.message : "Account data could not be updated.");
-    } finally {
-      requestInFlight.current = false;
-      setIsSyncing(false);
-    }
-  }, []);
+  const queueRef = useRef<ReturnType<typeof createRefreshQueue> | null>(null);
+  const demo = initialSnapshot?.mode === "demo";
+  const initiallyUnavailable = initialSnapshot === null;
 
   useEffect(() => {
-    if (initialSnapshot.mode !== "live") return;
-
-    const source = new EventSource(appPath("/api/portfolio/stream"));
-    let updateTimer: ReturnType<typeof setTimeout> | null = null;
-    let fallbackTimer: ReturnType<typeof setInterval> | null = null;
-
+    const queue = createRefreshQueue(async (since, signal) => {
+      setIsSyncing(true);
+      try {
+        const response = await fetch(
+          appPath(`/api/portfolio?since=${since}${demo ? "&demo=1" : ""}`),
+          {
+            cache: "no-store",
+            signal: AbortSignal.any([signal, AbortSignal.timeout(65_000)]),
+          },
+        );
+        const payload = (await response.json()) as
+          DashboardSnapshot | { error?: string };
+        if (!response.ok || !("summary" in payload))
+          throw new Error(
+            "error" in payload
+              ? payload.error
+              : "Account data could not be updated.",
+          );
+        if (!signal.aborted) {
+          setSnapshot(payload);
+          setError("");
+        }
+      } catch (cause) {
+        if (!signal.aborted)
+          setError(
+            cause instanceof Error
+              ? cause.message
+              : "Account data could not be updated.",
+          );
+      } finally {
+        if (!signal.aborted) setIsSyncing(false);
+      }
+    });
+    queueRef.current = queue;
+    if (demo)
+      return () => {
+        queue.stop();
+        queueRef.current = null;
+      };
+    let fallback: ReturnType<typeof setInterval> | null = null;
     const startFallback = () => {
-      if (fallbackTimer) return;
-      fallbackTimer = setInterval(updateSnapshot, FALLBACK_REFRESH_MS);
+      fallback ??= setInterval(() => void queue.request(Date.now()), 15_000);
     };
-
     const stopFallback = () => {
-      if (!fallbackTimer) return;
-      clearInterval(fallbackTimer);
-      fallbackTimer = null;
+      if (fallback) clearInterval(fallback);
+      fallback = null;
     };
-
+    startFallback();
+    if (initiallyUnavailable) void queue.request(Date.now());
+    const source = new EventSource(appPath("/api/portfolio/stream"));
+    const eventTime = (event: Event) => {
+      try {
+        return (
+          Date.parse(JSON.parse((event as MessageEvent).data).at) || Date.now()
+        );
+      } catch {
+        return Date.now();
+      }
+    };
     source.onopen = () => setSyncState("connecting");
-    source.addEventListener("ready", () => {
+    source.addEventListener("ready", (event) => {
       stopFallback();
       setSyncState("live");
+      void queue.request(eventTime(event));
     });
-    source.addEventListener("update", () => {
-      if (updateTimer) clearTimeout(updateTimer);
-      updateTimer = setTimeout(updateSnapshot, 350);
+    // The queue keeps a trailing refresh even if the event arrives during a fetch.
+    source.addEventListener("update", (event) => {
+      void queue.request(eventTime(event));
     });
     source.addEventListener("stream-error", () => {
       setSyncState("reconnecting");
@@ -156,250 +143,229 @@ export function Dashboard({
       setSyncState("reconnecting");
       startFallback();
     };
-
-    const reconcileTimer = setInterval(updateSnapshot, RECONCILE_REFRESH_MS);
-
+    const reconcile = setInterval(() => void queue.request(Date.now()), 60_000);
     return () => {
       source.close();
-      if (updateTimer) clearTimeout(updateTimer);
-      if (fallbackTimer) clearInterval(fallbackTimer);
-      clearInterval(reconcileTimer);
+      stopFallback();
+      clearInterval(reconcile);
+      queue.stop();
+      queueRef.current = null;
     };
-  }, [initialSnapshot.mode, updateSnapshot]);
+  }, [demo, initiallyUnavailable]);
 
-  const syncLabel =
+  const label =
     syncState === "demo"
       ? "Demo data"
-      : syncState === "live"
-        ? isSyncing
-          ? "Updating"
-          : "Live"
-        : syncState === "connecting"
-          ? "Connecting"
-          : "Reconnecting";
-
-  const openBook = computeOpenBook(snapshot.positions);
-
+      : isSyncing
+        ? "Updating"
+        : syncState === "live"
+          ? "Live updates"
+          : syncState === "connecting"
+            ? "Connecting"
+            : "Reconnecting";
+  const openBook = snapshot ? computeOpenBook(snapshot.positions) : null;
+  const summary = snapshot?.summary;
+  const realizedHistory =
+    snapshot?.realizedHistory || snapshot?.pnlHistory || [];
   return (
-    <div className="app">
+    <div className="app app--explorer">
       <div className="backdrop" aria-hidden="true">
         <span className="backdrop__aurora backdrop__aurora--lime" />
-        <span className="backdrop__aurora backdrop__aurora--cyan" />
-        <span className="backdrop__aurora backdrop__aurora--violet" />
         <span className="backdrop__grid" />
-        <span className="backdrop__noise" />
       </div>
-
       <header className="topbar">
         <div className="brand">
           <span className="brand__mark" aria-hidden="true">
             BB
           </span>
           <div className="brand__name">
-            <span className="brand__kicker">Polymarket US · live execution</span>
+            <span className="brand__kicker">Your Polymarket US account</span>
             <h1>
               Big Beautiful <em>Betting Monitor</em>
             </h1>
           </div>
         </div>
-        <div
-          className="live-bets"
-          role="status"
-          aria-label={`${summary.openMarkets} ${summary.openMarkets === 1 ? "bet is" : "bets are"} currently live`}
-        >
-          <span className="live-bets__signal" aria-hidden="true" />
-          <strong className="live-bets__count">
-            {formatNumber(summary.openMarkets, 0)}
-          </strong>
-          <span className="live-bets__copy" aria-hidden="true">
-            <span>Open bets</span>
-            <small>awaiting results</small>
-          </span>
-        </div>
         <div className="status">
           <LiveClock />
           <span className={`sync sync--${syncState}`}>
             <i aria-hidden="true" />
-            {syncLabel}
+            {label}
           </span>
-          <time className="status__synced" dateTime={snapshot.generatedAt}>
-            synced {formatDate(snapshot.generatedAt, true)}
-          </time>
+          <button
+            className="refresh-button"
+            type="button"
+            onClick={() => void queueRef.current?.request(Date.now())}
+            disabled={isSyncing}
+            aria-label="Refresh account"
+          >
+            ↻
+          </button>
         </div>
       </header>
-
-      <TickerTape snapshot={snapshot} />
-
       <main className="board">
         {error ? (
-          <div className="alert" role="alert" style={reveal(0)}>
-            <strong>Update failed.</strong> {error}
+          <div className="alert" role="alert">
+            <strong>
+              {snapshot ? "Update delayed." : "Account unavailable."}
+            </strong>{" "}
+            {error} Automatic recovery is active.
+            <button
+              type="button"
+              className="text-button"
+              onClick={() => void queueRef.current?.request(Date.now())}
+            >
+              Retry now
+            </button>
           </div>
         ) : null}
-
-        {snapshot.setupRequired ? (
-          <div className="rise" style={reveal(0)}>
-            <SetupBanner />
-          </div>
-        ) : null}
-
-        <div className="rise" style={reveal(1)}>
-          <AutomationPanel
-            initialSnapshot={initialAutomation}
-            accountBalance={summary.currentBalance}
-          />
-        </div>
-
-        <div className="hero-grid rise" style={reveal(2)}>
-          <PnlHero
-            summary={summary}
-            history={snapshot.pnlHistory}
-            asOf={snapshot.generatedAt}
-          />
-          <Scoreboard
-            history={snapshot.pnlHistory}
-            asOf={snapshot.generatedAt}
-          />
-        </div>
-
-        <section className="metric-rail rise" style={reveal(3)} aria-label="Account totals">
-          <MetricCard
-            label="Cash"
-            value={summary.currentBalance}
-            format={(value) => formatCurrency(value)}
-            detail={`${formatCurrency(summary.buyingPower)} available to bet`}
-            tone="cyan"
-            meter={
-              summary.currentBalance > 0
-                ? summary.buyingPower / summary.currentBalance
-                : 0
-            }
-          />
-          <MetricCard
-            label="Finished profit/loss"
-            value={summary.realizedPnl}
-            format={(value) => formatCurrency(value, true)}
-            detail={`${summary.closedMarkets} ${summary.closedMarkets === 1 ? "bet" : "bets"} finished`}
-            tone={summary.realizedPnl >= 0 ? "lime" : "coral"}
-          />
-          <MetricCard
-            label="Open profit/loss"
-            value={summary.estimatedOpenPnl}
-            format={(value) => formatCurrency(value, true)}
-            detail={`if ${summary.openMarkets === 1 ? "the open bet were" : `all ${summary.openMarkets} open bets were`} sold now`}
-            tone={summary.estimatedOpenPnl >= 0 ? "lime" : "coral"}
-          />
-          <MetricCard
-            label="Money in open bets"
-            value={openBook.atRisk}
-            format={(value) => formatCurrency(value)}
-            detail={`now worth ${formatCurrency(openBook.liveValue)}`}
-            tone="neutral"
-            meter={openBook.atRisk > 0 ? openBook.liveValue / openBook.maxPayout : 0}
-          />
-          <MetricCard
-            label="If every bet wins"
-            value={openBook.maxPayout}
-            format={(value) => formatCurrency(value)}
-            detail={`you'd profit ${formatCurrency(Math.max(openBook.maxProfit, 0), true)}`}
-            tone="neutral"
-          />
-          <MetricCard
-            label="Shares held"
-            value={openBook.contracts}
-            format={(value) => formatNumber(value, 0)}
-            detail="each winning share pays $1"
-            tone="neutral"
-          />
-        </section>
-
-        <div className="analysis-grid rise" style={reveal(4)}>
-          <PnlChart points={snapshot.pnlHistory} />
-          <div className="side-stack">
-            <EdgePanel history={snapshot.pnlHistory} />
-            <CashFlow summary={summary} openBook={openBook} />
-          </div>
-        </div>
-
-        <div className="records-grid rise" style={reveal(5)}>
-          <section className="panel" aria-labelledby="positions-heading">
-            <div className="records__head">
-              <div>
-                <h2 className="panel-title" id="positions-heading">
-                  Positions
-                </h2>
-                <p className="panel-sub">
-                  {summary.openMarkets} open · {summary.closedMarkets} finished
-                </p>
-              </div>
-              <div className="records__controls">
-                <div className="segmented" role="group" aria-label="Filter positions">
-                  {positionViews.map((view) => (
-                    <button
-                      key={view}
-                      type="button"
-                      aria-pressed={positionView === view}
-                      onClick={() => setPositionView(view)}
-                    >
-                      {positionViewLabels[view]}
-                    </button>
-                  ))}
-                </div>
-                <label className="search">
-                  <span className="sr-only">Search positions</span>
-                  <input
-                    type="search"
-                    placeholder="Search markets"
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                  />
-                </label>
-              </div>
-            </div>
-            <PositionsTable
-              positions={snapshot.positions}
-              query={query}
-              view={positionView}
-            />
-          </section>
-
-          <section className="panel" aria-labelledby="activity-heading">
-            <div className="records__head">
-              <div>
-                <h2 className="panel-title" id="activity-heading">
-                  Activity
-                </h2>
-                <p className="panel-sub">recent account changes</p>
-              </div>
-              <div className="segmented" role="group" aria-label="Filter account activity">
-                {activityViews.map((view) => (
+        {snapshot?.setupRequired ? <SetupBanner /> : null}
+        <AutomationPanel
+          initialSnapshot={initialAutomation}
+          accountBalance={summary?.currentBalance ?? null}
+        />
+        {snapshot && summary && openBook ? (
+          <>
+            <section
+              className="account-overview"
+              aria-label="Account at a glance"
+            >
+              <MetricCard
+                label="Total profit / loss"
+                value={summary.estimatedTotalPnl}
+                format={(value) => formatCurrency(value, true)}
+                detail="realized + current open P&L, after fees"
+                tone={summary.estimatedTotalPnl >= 0 ? "lime" : "coral"}
+              />
+              <MetricCard
+                label="Cash"
+                value={summary.currentBalance}
+                format={formatCurrency}
+                detail={`${formatCurrency(summary.buyingPower)} buying power · collateral excluded`}
+                tone="cyan"
+              />
+              <MetricCard
+                label="Win rate"
+                value={summary.winRate}
+                format={formatPercent}
+                detail={`${summary.wins} wins · ${summary.losses} losses · ${summary.pushes} ties`}
+                tone="neutral"
+              />
+              <MetricCard
+                label="Open bets"
+                value={summary.openMarkets}
+                format={(value) => String(Math.round(value))}
+                detail={`${formatCurrency(openBook.atRisk)} at risk · ${formatCurrency(openBook.liveValue)} current value`}
+                tone="neutral"
+              />
+            </section>
+            <div className="workspace-nav">
+              <div role="tablist" aria-label="Dashboard views">
+                {(
+                  [
+                    { value: "bets", label: "Bets" },
+                    { value: "performance", label: "Performance" },
+                    { value: "activity", label: "Activity" },
+                  ] as const
+                ).map((tab) => (
                   <button
-                    key={view}
+                    key={tab.value}
+                    id={`tab-${tab.value}`}
+                    role="tab"
                     type="button"
-                    aria-pressed={activityView === view}
-                    onClick={() => setActivityView(view)}
+                    aria-selected={view === tab.value}
+                    aria-controls={`view-${tab.value}`}
+                    onClick={() => {
+                      setView(tab.value);
+                      if (tab.value === "performance")
+                        setPerformanceOpened(true);
+                    }}
                   >
-                    {activityViewLabels[view]}
+                    {tab.label}
+                    {tab.value === "bets" ? (
+                      <span>{snapshot.positions.length}</span>
+                    ) : null}
                   </button>
                 ))}
               </div>
+              <time dateTime={snapshot.generatedAt}>
+                Updated {formatDate(snapshot.generatedAt, true)} MT
+              </time>
             </div>
-            <ActivityFeed activities={snapshot.activities} view={activityView} />
+            <div
+              className="view-panel"
+              role="tabpanel"
+              id="view-bets"
+              aria-labelledby="tab-bets"
+              hidden={view !== "bets"}
+            >
+              <BetsExplorer
+                positions={snapshot.positions}
+                activities={snapshot.activities}
+              />
+            </div>
+            <div
+              className="view-panel"
+              role="tabpanel"
+              id="view-performance"
+              aria-labelledby="tab-performance"
+              hidden={view !== "performance"}
+            >
+              {performanceOpened ? (
+                <>
+                  <div className="hero-grid">
+                    <PnlHero
+                      summary={summary}
+                      history={realizedHistory}
+                      asOf={snapshot.generatedAt}
+                    />
+                    <Scoreboard
+                      history={snapshot.pnlHistory}
+                      asOf={snapshot.generatedAt}
+                    />
+                  </div>
+                  <div className="analysis-grid">
+                    <PnlChart
+                      points={realizedHistory}
+                      asOf={snapshot.generatedAt}
+                    />
+                    <div className="side-stack">
+                      <EdgePanel history={snapshot.pnlHistory} />
+                      <CashFlow summary={summary} openBook={openBook} />
+                    </div>
+                  </div>
+                </>
+              ) : null}
+            </div>
+            <div
+              className="view-panel"
+              role="tabpanel"
+              id="view-activity"
+              aria-labelledby="tab-activity"
+              hidden={view !== "activity"}
+            >
+              <ActivityExplorer activities={snapshot.activities} />
+            </div>
+            <footer className="foot">
+              <p className="foot__line">
+                Private account monitor · dates shown in Mountain Time
+              </p>
+              <ul className="foot__notes">
+                {snapshot.notes.map((note) => (
+                  <li key={note}>{note}</li>
+                ))}
+              </ul>
+            </footer>
+          </>
+        ) : (
+          <section className="panel account-loading" aria-live="polite">
+            <span className="section-eyebrow">Connecting to your account</span>
+            <h2>{error ? "Waiting for account data" : "Loading your bets"}</h2>
+            <p>
+              Your actual balance and history will appear when the connection
+              recovers.
+            </p>
           </section>
-        </div>
-
-        <footer className="foot rise" style={reveal(6)}>
-          <p className="foot__line">
-            Local monitor + automatic execution · your API key never leaves this computer
-          </p>
-          {snapshot.notes.length ? (
-            <ul className="foot__notes">
-              {snapshot.notes.map((note) => (
-                <li key={note}>{note}</li>
-              ))}
-            </ul>
-          ) : null}
-        </footer>
+        )}
       </main>
     </div>
   );

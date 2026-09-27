@@ -18,7 +18,9 @@ export function formatCompactCurrency(value: number): string {
 }
 
 export function formatNumber(value: number, maximumFractionDigits = 1): string {
-  return new Intl.NumberFormat("en-US", { maximumFractionDigits }).format(value);
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits }).format(
+    value,
+  );
 }
 
 export function formatPercent(value: number): string {
@@ -44,6 +46,7 @@ export function formatDate(value: string, includeTime = false): string {
   if (Number.isNaN(date.getTime())) return "Date unavailable";
 
   return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Denver",
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -54,4 +57,21 @@ export function formatDate(value: string, includeTime = false): string {
         }
       : {}),
   }).format(date);
+}
+
+const calendarDayFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Denver",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+/** Calendar-day filters use the same timezone as every displayed timestamp. */
+export function dateKey(value: string): string {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  const parts = calendarDayFormatter.formatToParts(date);
+  const part = (name: string) =>
+    parts.find((entry) => entry.type === name)?.value || "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
 }

@@ -6,10 +6,7 @@ import { Sparkline } from "@/components/sparkline";
 import type { DashboardSummary, PnlPoint } from "@/lib/dashboard-types";
 import { formatCurrency, formatPercent } from "@/lib/format";
 import { computePnlRange } from "@/lib/pnl-range";
-import {
-  RECORD_RANGE_OPTIONS,
-  type RecordRange,
-} from "@/lib/record-range";
+import { RECORD_RANGE_OPTIONS, type RecordRange } from "@/lib/record-range";
 
 interface PnlHeroProps {
   summary: DashboardSummary;
@@ -23,7 +20,8 @@ export function PnlHero({ summary, history, asOf }: PnlHeroProps) {
     () => computePnlRange(history, range, asOf),
     [asOf, history, range],
   );
-  const total = selected.realizedPnl + summary.estimatedOpenPnl;
+  const realized = range === "all" ? summary.realizedPnl : selected.realizedPnl;
+  const total = realized + summary.estimatedOpenPnl;
   const roi = summary.deposits > 0 ? (total / summary.deposits) * 100 : null;
   const trend = total >= 0 ? "up" : "down";
 
@@ -33,8 +31,7 @@ export function PnlHero({ summary, history, asOf }: PnlHeroProps) {
         <div>
           <h2 className="panel-title">Total profit/loss</h2>
           <p className="panel-sub">
-            finished bets{range === "all" ? "" : " in range"} + open bets
-            if sold now
+            realized{range === "all" ? "" : " in range"} + open bets if sold now
           </p>
         </div>
         <div className="hero__range-scroll">
@@ -66,12 +63,10 @@ export function PnlHero({ summary, history, asOf }: PnlHeroProps) {
 
       <div className="hero__chips">
         <span className="chip">
-          Finished bets{range === "all" ? "" : " in range"}
+          Realized{range === "all" ? "" : " in range"}
           <AnimatedNumber
-            className={
-              selected.realizedPnl >= 0 ? "is-positive" : "is-negative"
-            }
-            value={selected.realizedPnl}
+            className={realized >= 0 ? "is-positive" : "is-negative"}
+            value={realized}
             format={(value) => formatCurrency(value, true)}
           />
         </span>
@@ -87,7 +82,7 @@ export function PnlHero({ summary, history, asOf }: PnlHeroProps) {
         </span>
         {roi !== null ? (
           <span className="chip">
-            Return on money added
+            Return on deposits
             <AnimatedNumber
               className={roi >= 0 ? "is-positive" : "is-negative"}
               value={roi}

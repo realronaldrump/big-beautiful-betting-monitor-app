@@ -3,6 +3,13 @@ export type BetResult = "win" | "loss" | "push" | "open";
 export type ActivityKind = "trade" | "settlement" | "cash" | "other";
 
 export interface PositionRow {
+  side?: "yes" | "no" | "mixed";
+  amountBet?: number | null;
+  feesPaid?: number;
+  entryQuantity?: number;
+  tradeCount?: number;
+  openedAt?: string;
+  eventSlug?: string;
   marketSlug: string;
   title: string;
   outcome: string;
@@ -17,6 +24,7 @@ export interface PositionRow {
 }
 
 export interface ActivityRow {
+  marketSlug?: string;
   id: string;
   kind: ActivityKind;
   type: string;
@@ -68,5 +76,6 @@ export interface DashboardSnapshot {
   positions: PositionRow[];
   activities: ActivityRow[];
   pnlHistory: PnlPoint[];
+  realizedHistory?: PnlPoint[];
   notes: string[];
 }

@@ -48,11 +48,12 @@ The strategy is:
 - One accepted bet per market, persisted across restarts
 - Three retries after an explicit rejection, with 1, 2, and 4 second delays
 - No retry after an ambiguous network failure, because the first order may have reached the exchange
-- A configurable cash floor; no bet fires if a $1 order could take the account below it
+- A configurable cash floor that protects available cash after contract cost, conservatively reserved fees, and unresolved orders
+- Final settings, quote, market, and balance checks at HTTP dispatch; queued work is invalidated by Off or a settings change
 
 The dashboard switch is the master control. Turning it off stops new orders; it does not cancel or reverse an order that Polymarket already accepted.
 
-Trigger, execution-cap, and cash-floor edits remain drafts until you press **Save settings**. The panel reads the stored values back from SQLite and shows a timestamped **Bet settings locked in** confirmation only when that independent check matches the requested settings. The on/off switch remains immediate so Auto-bet can always be stopped without saving a draft first.
+Trigger, execution-cap, and cash-floor edits remain drafts until you press **Save settings**. The panel reads the stored values back from SQLite and shows a timestamped **Bet settings locked in** confirmation only when that independent check matches the requested settings. The on/off switch remains immediate so Auto-bet can always be stopped without saving a draft first. Off supersedes an in-progress save. Settings edits use a revision check and never change the master switch; stale writes are rejected.
 
 ## Updates
 
@@ -62,9 +63,25 @@ The app uses Polymarket US's private WebSocket for immediate order, position, an
 - Connection lost: automatic reconnection plus a 15-second REST fallback
 - Reconciliation: one background refresh every 60 seconds
 
-When Auto-bet is armed, a separate local worker queries only events marked live by Polymarket and subscribes to their market-data WebSockets. Quotes are event-driven. The worker refreshes the live-event set every 15 seconds and rechecks the latest quote and account balance immediately before an order.
+When Auto-bet is armed, a separate local worker queries only events marked live by Polymarket and subscribes to their market-data WebSockets. Quotes are event-driven and the latest quote is retained while evaluation is in flight. The worker refreshes the live-event set every 15 seconds and reads the latest streamed quote and balance immediately before dispatch. Quote freshness and account subscription readiness gate all submissions. Rejection waits are interrupted by settings changes or shutdown.
+
+The web process and worker share a SQLite-backed request budget (at most eight REST request starts per second for this app). Concurrent dashboard reads share a snapshot refresh; an event arriving during a refresh causes one trailing refresh. A failed initial account load shows an unavailable state and retries, rather than substituting sample money.
 
 Polymarket's authenticated REST limit is 20 requests per second per API key. Their documentation recommends WebSocket subscriptions instead of frequent polling.
+
+## Finding and comparing bets
+
+The default **Bets** view contains the entire account history, grouped once per market.
+
+- Filter All, Open, Wins, Losses, Ties/refunds, or all finished markets.
+- Sort by newest/oldest, largest/smallest amount bet, highest profit/biggest loss, or market name. Amount, P&L, and date column headings are also sortable.
+- Combine minimum/maximum stake and inclusive date filters. Dates use Mountain Time consistently on the server and in the browser.
+- Search words in any order across teams, markets, outcomes, market IDs, and result labels. Minor spelling errors are tolerated. Quoted phrases are exact; `-word` excludes a term. Optional operators include `stake:>=5`, `pnl:<0`, and `result:win`.
+- Every active filter is visible and removable. No-match views explain how to reset them.
+- Expand a market to inspect stake, recorded fees, realized/open P&L, and its trade/settlement history.
+- Page through 10/25/50/100 bets at a time, or export all matching results as CSV (not just the current page).
+
+**Performance** retains P&L charts, results, and cash flow. **Activity** searches and pages through the full trade/cash history. Bet filters survive switching views. Auto-bet's master switch stays accessible while its detailed settings are collapsed.
 
 ## What it shows
 
@@ -77,9 +94,12 @@ Polymarket's authenticated REST limit is 20 requests per second per API key. The
 ## Accounting
 
 - Each closed market counts once.
-- Positive final realized P&L is a win; negative is a loss; within half a cent of zero is a push.
+- Positive final net P&L is a win; negative is a loss; within half a cent of zero is a push.
 - Pushes do not count toward win rate.
-- Estimated open P&L is current cash value minus reported cost basis.
+- Stake and net P&L use executed cash costs/proceeds and resolution payouts, including charged fees. Settlement metadata retains the original outcome; fully exited markets omitted by the positions endpoint are recovered from trades.
+- Estimated open P&L is current position value minus the remaining cost basis. Realized history includes partial exits on still-open positions.
+- Cash excludes collateral reserved for synthetic shorts; this avoids counting collateral and the contract value twice.
+- Missing historical cost information stays unavailable rather than becoming a zero-dollar stake.
 - Net funding is completed deposits minus completed withdrawals.
 - Advanced deposits are excluded to avoid counting a pending deposit twice.
 
@@ -138,3 +158,13 @@ npm run lint
 - [Polymarket US rate limits](https://docs.polymarket.us/api-reference/rate-limits)
 - [Portfolio API](https://docs.polymarket.us/api-reference/portfolio/overview)
 - [Authentication](https://docs.polymarket.us/api-reference/authentication)
+
+## Recovery and health
+
+Attempts persist their local identity and pre-submit/dispatch phase. On restart, preview-only reservations are safe to reevaluate; known exchange IDs are reconciled through read-only order lookup. An interrupted legacy submission with no exchange ID is explicitly marked **Needs review** and remains blocked from automatic retries. It is not assumed to have failed and is never blindly resubmitted.
+
+The health response includes storage availability and worker heartbeat/liveness/readiness. A stale heartbeat returns HTTP 503 and shows **Worker unavailable** instead of Armed. Failed subscriptions close the affected connections and retry; receiving a TCP/WebSocket connection alone does not establish subscription readiness.
+
+Without credentials the worker remains dormant, so the documented combined dev/start commands can serve demo data. Production's secrets and SQLite path stay outside the repository. Migrations are additive and preserve existing switches, thresholds, and attempt history.
+
+The September 2026 audit remediation and regression coverage are mapped in [docs/audit-remediation.md](docs/audit-remediation.md).

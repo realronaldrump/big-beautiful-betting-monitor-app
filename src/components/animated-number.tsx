@@ -11,7 +11,7 @@ interface AnimatedNumberProps {
 }
 
 /**
- * Renders the final value on the server, rolls up from zero after hydration,
+ * Renders the actual value immediately on both server and client,
  * then tweens between values and flashes on every live update.
  */
 export function AnimatedNumber({
@@ -21,11 +21,13 @@ export function AnimatedNumber({
   className,
 }: AnimatedNumberProps) {
   const [display, setDisplay] = useState(value);
-  const [pulse, setPulse] = useState<{ direction: "up" | "down"; key: number }>({
-    direction: "up",
-    key: 0,
-  });
-  const committed = useRef<number | null>(null);
+  const [pulse, setPulse] = useState<{ direction: "up" | "down"; key: number }>(
+    {
+      direction: "up",
+      key: 0,
+    },
+  );
+  const committed = useRef<number | null>(value);
   const frame = useRef(0);
 
   useEffect(() => {

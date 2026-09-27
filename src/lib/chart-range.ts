@@ -1,13 +1,6 @@
 import type { PnlPoint } from "@/lib/dashboard-types";
 
-export type ChartRange =
-  | "15m"
-  | "1h"
-  | "6h"
-  | "24h"
-  | "7d"
-  | "30d"
-  | "all";
+export type ChartRange = "15m" | "1h" | "6h" | "24h" | "7d" | "30d" | "all";
 
 interface SelectedChartRange {
   points: PnlPoint[];
@@ -23,31 +16,25 @@ const RANGE_MS: Record<Exclude<ChartRange, "all">, number> = {
   "30d": 30 * 24 * 60 * 60 * 1000,
 };
 
-/** Selects a trailing date window, anchored to the newest settled market. */
+/** Selects a trailing date window, ending at the account snapshot time. */
 export function selectChartRange(
   points: PnlPoint[],
   range: ChartRange,
+  asOf: string,
 ): SelectedChartRange {
   if (!points.length || range === "all") {
     return { points, startingCumulative: 0 };
   }
 
-  const latestTime = Date.parse(points[points.length - 1].occurredAt);
-  if (!Number.isFinite(latestTime)) {
-    return { points, startingCumulative: 0 };
-  }
-
-  const cutoff = latestTime - RANGE_MS[range];
-  const startIndex = points.findIndex(
-    (point) => Date.parse(point.occurredAt) >= cutoff,
-  );
-
-  if (startIndex <= 0) {
-    return { points, startingCumulative: 0 };
-  }
-
-  return {
-    points: points.slice(startIndex),
-    startingCumulative: points[startIndex - 1].cumulative,
-  };
+  const endTime = Date.parse(asOf);
+  if (!Number.isFinite(endTime)) return { points: [], startingCumulative: 0 };
+  const cutoff = endTime - RANGE_MS[range];
+  const selected = points.filter((point) => {
+    const time = Date.parse(point.occurredAt);
+    return time >= cutoff && time <= endTime;
+  });
+  const preceding = points
+    .filter((point) => Date.parse(point.occurredAt) < cutoff)
+    .at(-1);
+  return { points: selected, startingCumulative: preceding?.cumulative || 0 };
 }

@@ -22,18 +22,24 @@ export async function GET(request: Request): Promise<Response> {
   let controllerRef: ReadableStreamDefaultController<Uint8Array> | null = null;
   let keepAlive: ReturnType<typeof setInterval> | null = null;
   let ended = false;
+  let connectTimeout: ReturnType<typeof setTimeout> | null = null;
 
   function send(event: string, data: Record<string, string>): void {
     if (ended || !controllerRef) return;
-    controllerRef.enqueue(
-      encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
-    );
+    try {
+      controllerRef.enqueue(
+        encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+      );
+    } catch {
+      close();
+    }
   }
 
   function close(): void {
     if (ended) return;
     ended = true;
     if (keepAlive) clearInterval(keepAlive);
+    if (connectTimeout) clearTimeout(connectTimeout);
     socket.close();
     try {
       controllerRef?.close();
@@ -65,18 +71,31 @@ export async function GET(request: Request): Promise<Response> {
 
       request.signal.addEventListener("abort", close, { once: true });
 
+      connectTimeout = setTimeout(() => {
+        send("stream-error", { message: "Real-time connection timed out." });
+        close();
+      }, 10_000);
       void socket
         .connect()
         .then(() => {
-          if (ended) return;
+          if (connectTimeout) clearTimeout(connectTimeout);
+          if (ended) {
+            socket.close();
+            return;
+          }
           socket.subscribeOrders("bbbma-orders");
           socket.subscribePositions("bbbma-positions");
           socket.subscribeAccountBalance("bbbma-balance");
           send("ready", { at: new Date().toISOString() });
         })
         .catch((error) => {
-          console.error("Polymarket US private stream could not connect", error);
-          send("stream-error", { message: "Real-time connection could not start." });
+          console.error(
+            "Polymarket US private stream could not connect",
+            error,
+          );
+          send("stream-error", {
+            message: "Real-time connection could not start.",
+          });
           close();
         });
     },

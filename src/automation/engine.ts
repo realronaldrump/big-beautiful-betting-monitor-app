@@ -1,6 +1,8 @@
 import type { CreateOrderParams, CreateOrderResponse } from "polymarket-us";
 import { evaluateQuote } from "@/automation/strategy";
 import type { AutomationStore } from "@/automation/store";
+import type { ParsedOrderExecution } from "./websocket-parsers";
+import { RequestCancelledError } from "@/lib/polymarket-rest";
 
 export interface TrackedMarket {
   marketSlug: string;
@@ -27,19 +29,24 @@ export interface AccountBalances {
 }
 
 export interface TradingAdapter {
-  previewOrder(order: CreateOrderParams): Promise<unknown>;
-  createOrder(order: CreateOrderParams): Promise<CreateOrderResponse>;
-  getQuote(marketSlug: string): Promise<MarketQuote>;
+  previewOrder(order: CreateOrderParams, check?: () => void): Promise<unknown>;
+  createOrder(
+    order: CreateOrderParams,
+    beforeSend: () => void,
+  ): Promise<CreateOrderResponse>;
+  getOrder?(orderId: string): Promise<ParsedOrderExecution>;
+  getQuote?(marketSlug: string): Promise<MarketQuote>;
   getBalances(): Promise<AccountBalances>;
   sleep(milliseconds: number): Promise<void>;
 }
 
 export type ProcessQuoteResult =
-  | "ignored"
-  | "submitted"
-  | "filled"
-  | "exhausted"
-  | "ambiguous";
+  "ignored" | "submitted" | "filled" | "canceled" | "exhausted" | "ambiguous";
+export interface QuoteState {
+  market: TrackedMarket;
+  quote: MarketQuote;
+  balances: AccountBalances;
+}
 
 type CandidateSide = "long" | "short";
 
@@ -60,24 +67,28 @@ function decimalPlaces(value: number) {
 function alignDown(value: number, increment: number) {
   if (!Number.isFinite(increment) || increment <= 0) return value;
   const places = Math.min(Math.max(decimalPlaces(increment), 2), 8);
-  return Number((Math.floor((value + 1e-10) / increment) * increment).toFixed(places));
+  return Number(
+    (Math.floor((value + 1e-10) / increment) * increment).toFixed(places),
+  );
 }
 
 function alignUp(value: number, increment: number) {
   if (!Number.isFinite(increment) || increment <= 0) return value;
   const places = Math.min(Math.max(decimalPlaces(increment), 2), 8);
-  return Number((Math.ceil((value - 1e-10) / increment) * increment).toFixed(places));
+  return Number(
+    (Math.ceil((value - 1e-10) / increment) * increment).toFixed(places),
+  );
 }
 
-function amount(value: number) {
-  return { value: value.toFixed(2), currency: "USD" as const };
+function amount(value: number, tick: number) {
+  return {
+    value: value.toFixed(Math.min(8, Math.max(2, decimalPlaces(tick)))),
+    currency: "USD" as const,
+  };
 }
 
 function isMarketOpen(quote: MarketQuote, market: TrackedMarket) {
-  return (
-    market.isOpen &&
-    (!quote.state || quote.state === "MARKET_STATE_OPEN")
-  );
+  return market.isOpen && (!quote.state || quote.state === "MARKET_STATE_OPEN");
 }
 
 function selectCandidate(
@@ -143,6 +154,12 @@ function buildOrder(
       : alignUp(1 - executionCap, tick);
   const effectiveOutcomeLimit =
     candidate.side === "long" ? underlyingLimit : 1 - underlyingLimit;
+  if (
+    underlyingLimit <= 0 ||
+    underlyingLimit >= 1 ||
+    candidate.outcomePrice > effectiveOutcomeLimit + 1e-9
+  )
+    return null;
   const minimumTradeQty = market.minimumTradeQty || 0.01;
   if (minimumTradeQty * effectiveOutcomeLimit > 1 + 1e-9) return null;
   const quantity = alignDown(1 / effectiveOutcomeLimit, minimumTradeQty);
@@ -152,7 +169,7 @@ function buildOrder(
     marketSlug: market.marketSlug,
     intent: candidate.intent,
     type: "ORDER_TYPE_LIMIT",
-    price: amount(underlyingLimit),
+    price: amount(underlyingLimit, tick),
     quantity,
     tif: "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
     participateDontInitiate: false,
@@ -176,7 +193,9 @@ function isRateLimitError(error: unknown) {
   }
   if (!(error instanceof Error)) return false;
   const message = error.message.toLowerCase();
-  return message.includes("error 1015") || message.includes("being rate limited");
+  return (
+    message.includes("error 1015") || message.includes("being rate limited")
+  );
 }
 
 function isDefiniteHttpRejection(error: unknown) {
@@ -184,7 +203,7 @@ function isDefiniteHttpRejection(error: unknown) {
     return false;
   }
   const status = Number((error as { status?: unknown }).status);
-  return status >= 400 && status < 500;
+  return status >= 400 && status < 500 && ![408, 429, 499].includes(status);
 }
 
 function responseWasRejected(response: CreateOrderResponse) {
@@ -216,158 +235,375 @@ function rejectionText(response: CreateOrderResponse) {
       execution.type === "EXECUTION_TYPE_REJECTED" ||
       execution.order?.state === "ORDER_STATE_REJECTED",
   );
-  return rejected?.text || rejected?.orderRejectReason || "Order rejected by Polymarket";
+  return (
+    rejected?.text ||
+    rejected?.orderRejectReason ||
+    "Order rejected by Polymarket"
+  );
+}
+
+/** Reserve fees at the limit, with a conservative coefficient covering standard sports
+ * fees (including the announced table-tennis increase). Preview can increase the reserve.
+ * https://docs.polymarket.us/fees */
+export function maximumOrderDebit(order: CreateOrderParams, preview?: unknown) {
+  const price = Number(order.price?.value);
+  const outcomePrice =
+    order.intent === "ORDER_INTENT_BUY_SHORT" ? 1 - price : price;
+  const quantity = Number(order.quantity);
+  if (
+    !Number.isFinite(quantity) ||
+    quantity <= 0 ||
+    outcomePrice <= 0 ||
+    outcomePrice >= 1
+  )
+    return Infinity;
+  const value = outcomePrice * quantity;
+  const response = preview as
+    | {
+        order?: {
+          commissionNotionalTotalCollected?: { value?: string };
+          commissionsBasisPoints?: string;
+        };
+      }
+    | undefined;
+  const fee = Math.max(
+    0.1 * quantity * outcomePrice * (1 - outcomePrice),
+    Number(response?.order?.commissionNotionalTotalCollected?.value) || 0,
+    (value * (Number(response?.order?.commissionsBasisPoints) || 0)) / 10_000,
+  );
+  return value + Math.ceil((fee - 1e-10) * 100) / 100;
 }
 
 export class AutomationEngine {
   private readonly processing = new Set<string>();
+  private readonly earlyExecutions = new Map<string, ParsedOrderExecution[]>();
 
   constructor(
     private readonly store: AutomationStore,
     private readonly adapter: TradingAdapter,
   ) {}
 
-  async processQuote(input: {
-    market: TrackedMarket;
-    quote: MarketQuote;
-    balances: AccountBalances;
-  }): Promise<ProcessQuoteResult> {
-    const { market } = input;
-    if (this.processing.has(market.marketSlug)) return "ignored";
-    this.processing.add(market.marketSlug);
+  handleOrderExecution(execution: ParsedOrderExecution) {
+    const { id, marketSlug } = execution.order || {};
+    if (!id || !marketSlug) return;
+    const attempt = this.store.getAttempt(marketSlug);
+    if (!attempt) return;
+    if (attempt.orderId !== id) {
+      // An execution may precede its HTTP acknowledgement. Never apply it by slug.
+      if (
+        attempt.status === "submitting" &&
+        attempt.phase === "dispatch" &&
+        !attempt.orderId
+      ) {
+        const pending = this.earlyExecutions.get(id) || [];
+        this.earlyExecutions.set(id, [...pending, execution].slice(-8));
+        if (this.earlyExecutions.size > 256)
+          this.earlyExecutions.delete(
+            this.earlyExecutions.keys().next().value!,
+          );
+      }
+      return;
+    }
+    const response = { id, executions: [execution] } as CreateOrderResponse;
+    if (responseHasAnyFill(response))
+      this.store.markFilled(marketSlug, id, attempt.attemptId);
+    else if (responseWasRejected(response))
+      this.store.markExplicitRejection(
+        marketSlug,
+        rejectionText(response),
+        attempt.attemptId,
+      );
+    else if (
+      ["ORDER_STATE_CANCELED", "ORDER_STATE_EXPIRED"].includes(
+        execution.order.state || "",
+      ) ||
+      ["EXECUTION_TYPE_CANCELED", "EXECUTION_TYPE_EXPIRED"].includes(
+        execution.type || "",
+      )
+    )
+      this.store.markCanceled(marketSlug, id, attempt.attemptId);
+    else if (execution.order.state?.startsWith("ORDER_STATE_"))
+      this.store.markSubmitted(marketSlug, id, attempt.attemptId);
+  }
 
+  async reconcileInterruptedAttempts() {
+    for (const attempt of this.store.listUnresolvedAttempts()) {
+      if (this.processing.has(attempt.marketSlug)) continue;
+      if (attempt.status === "submitting" && attempt.phase === "preview") {
+        this.store.deferAttempt(
+          attempt.marketSlug,
+          "Worker restarted before submission; safe to evaluate again.",
+          attempt.attemptId,
+        );
+      } else if (attempt.orderId && this.adapter.getOrder) {
+        try {
+          this.handleOrderExecution(
+            await this.adapter.getOrder(attempt.orderId),
+          );
+        } catch {
+          this.store.markAmbiguous(
+            attempt.marketSlug,
+            "Waiting to reconcile this order with Polymarket. Automatic retries are blocked.",
+            attempt.attemptId,
+          );
+        }
+      } else if (attempt.status !== "ambiguous") {
+        this.store.markAmbiguous(
+          attempt.marketSlug,
+          "Interrupted order has no recorded exchange ID. Check the exchange history; automatic retries are blocked.",
+          attempt.attemptId,
+        );
+      }
+    }
+  }
+
+  async processQuote(
+    input: QuoteState & {
+      readCurrent?: () => QuoteState | null;
+      isCancelled?: () => boolean;
+    },
+  ): Promise<ProcessQuoteResult> {
+    const slug = input.market.marketSlug;
+    if (this.processing.has(slug)) return "ignored";
+    this.processing.add(slug);
+    const revision = this.store.getConfig().revision;
+    const current = () => (input.readCurrent ? input.readCurrent() : input);
+    const valid = () => {
+      const config = this.store.getConfig();
+      return (
+        !input.isCancelled?.() &&
+        config.enabled &&
+        config.revision === revision &&
+        current() !== null
+      );
+    };
+    const check = () => {
+      if (!valid())
+        throw new RequestCancelledError(
+          "Settings, market, or connection changed before submission.",
+        );
+    };
+    let preferredSide: CandidateSide | undefined;
+    let waitedAttempt: string | undefined;
     try {
-      let quote = input.quote;
-      let balances = input.balances;
-      let preferredSide: CandidateSide | undefined;
-
       for (;;) {
+        if (!valid()) return "ignored";
+        const state = current()!;
         const config = this.store.getConfig();
-        if (!config.enabled) return "ignored";
+        const previous = this.store.getAttempt(slug);
+        if (
+          previous?.status === "retryable" &&
+          previous.attempts > 0 &&
+          previous.attemptId !== waitedAttempt
+        ) {
+          waitedAttempt = previous.attemptId;
+          const delay =
+            RETRY_DELAYS_MS[
+              Math.min(previous.attempts - 1, RETRY_DELAYS_MS.length - 1)
+            ];
+          const remaining = Math.max(
+            0,
+            delay - Math.max(0, Date.now() - Date.parse(previous.updatedAt)),
+          );
+          if (
+            !(await this.waitBeforeRetry(previous.attempts, valid, remaining))
+          )
+            return "ignored";
+          continue;
+        }
 
-        const previous = this.store.getAttempt(market.marketSlug);
-        const alreadyBet = Boolean(previous && previous.status !== "retryable");
         const candidate = selectCandidate(
-          market,
-          quote,
-          balances,
+          state.market,
+          state.quote,
+          state.balances,
           config.balanceFloor,
           config.triggerPrice,
           config.executionCap,
-          alreadyBet,
+          Boolean(previous && previous.status !== "retryable"),
           preferredSide,
         );
         if (!candidate) return "ignored";
         preferredSide = candidate.side;
-
-        const order = buildOrder(market, candidate, config.executionCap);
+        const order = buildOrder(state.market, candidate, config.executionCap);
         if (!order) return "ignored";
-
         const attempt = this.store.beginAttempt({
-          marketSlug: market.marketSlug,
-          eventSlug: market.eventSlug,
-          title: market.marketTitle || market.eventTitle,
+          marketSlug: slug,
+          eventSlug: state.market.eventSlug,
+          title: state.market.marketTitle || state.market.eventTitle,
           outcome: candidate.outcome,
           triggerPrice: candidate.outcomePrice,
         });
         if (!attempt) return "ignored";
+        let preview: unknown;
         try {
-          await this.adapter.previewOrder(order);
+          preview = await this.adapter.previewOrder(order, check);
         } catch (error) {
-          if (isRateLimitError(error)) {
-            this.store.deferAttempt(market.marketSlug, errorMessage(error));
+          if (
+            error instanceof RequestCancelledError ||
+            !isDefiniteHttpRejection(error)
+          ) {
+            this.store.deferAttempt(
+              slug,
+              errorMessage(error),
+              attempt.attemptId,
+            );
+            if (error instanceof RequestCancelledError) return "ignored";
             throw error;
           }
-          const canRetry = this.store.markExplicitRejection(
-            market.marketSlug,
-            `Preview failed: ${errorMessage(error)}`,
-          );
-          if (!canRetry) return "exhausted";
-          await this.waitBeforeRetry(attempt.attempts);
-          quote = await this.adapter.getQuote(market.marketSlug);
-          balances = await this.adapter.getBalances();
+          if (
+            !this.store.markExplicitRejection(
+              slug,
+              `Preview rejected: ${errorMessage(error)}`,
+              attempt.attemptId,
+            )
+          )
+            return "exhausted";
           continue;
         }
-
-        const latestConfig = this.store.getConfig();
-        if (!latestConfig.enabled) {
-          this.store.markExplicitRejection(
-            market.marketSlug,
-            "Automation was switched off before submission",
-          );
-          return "ignored";
-        }
-        if (
-          latestConfig.balanceFloor !== config.balanceFloor ||
-          latestConfig.triggerPrice !== config.triggerPrice ||
-          latestConfig.executionCap !== config.executionCap
-        ) {
+        if (!valid()) {
           this.store.deferAttempt(
-            market.marketSlug,
+            slug,
             "Automation settings changed before submission",
+            attempt.attemptId,
           );
           return "ignored";
         }
-
+        const beforeSend = () => {
+          check();
+          const latest = current()!;
+          const latestConfig = this.store.getConfig();
+          const eligible = selectCandidate(
+            latest.market,
+            latest.quote,
+            latest.balances,
+            latestConfig.balanceFloor,
+            latestConfig.triggerPrice,
+            latestConfig.executionCap,
+            false,
+            candidate.side,
+          );
+          const debit = maximumOrderDebit(order, preview);
+          if (
+            !eligible ||
+            Math.min(
+              latest.balances.currentBalance,
+              latest.balances.buyingPower,
+            ) -
+              debit <
+              latestConfig.balanceFloor - 1e-9
+          ) {
+            throw new RequestCancelledError(
+              "Latest quote or fee-inclusive balance no longer permits this order.",
+            );
+          }
+          if (
+            !this.store.markDispatching(
+              slug,
+              attempt.attemptId,
+              revision,
+              debit,
+            )
+          )
+            throw new RequestCancelledError(
+              "Order reservation or settings changed.",
+            );
+        };
+        let response: CreateOrderResponse;
         try {
-          const response = await this.adapter.createOrder(order);
-          if (responseHasAnyFill(response)) {
-            this.store.markFilled(market.marketSlug, response.id);
-            return "filled";
-          }
-          if (responseWasRejected(response)) {
-            const canRetry = this.store.markExplicitRejection(
-              market.marketSlug,
-              rejectionText(response),
-            );
-            if (!canRetry) return "exhausted";
-            await this.waitBeforeRetry(attempt.attempts);
-            quote = await this.adapter.getQuote(market.marketSlug);
-            balances = await this.adapter.getBalances();
-            continue;
-          }
-
-          if (!response.id) {
-            this.store.markAmbiguous(
-              market.marketSlug,
-              "Polymarket returned no order ID",
-            );
-            return "ambiguous";
-          }
-
-          this.store.markSubmitted(market.marketSlug, response.id);
-          return "submitted";
+          response = await this.adapter.createOrder(order, beforeSend);
         } catch (error) {
-          if (isRateLimitError(error)) {
-            this.store.deferAttempt(market.marketSlug, errorMessage(error));
+          if (
+            error instanceof RequestCancelledError ||
+            isRateLimitError(error)
+          ) {
+            this.store.deferAttempt(
+              slug,
+              errorMessage(error),
+              attempt.attemptId,
+            );
+            if (error instanceof RequestCancelledError) return "ignored";
             throw error;
           }
           if (isDefiniteHttpRejection(error)) {
-            const canRetry = this.store.markExplicitRejection(
-              market.marketSlug,
-              errorMessage(error),
-            );
-            if (!canRetry) return "exhausted";
-            await this.waitBeforeRetry(attempt.attempts);
-            quote = await this.adapter.getQuote(market.marketSlug);
-            balances = await this.adapter.getBalances();
+            if (
+              !this.store.markExplicitRejection(
+                slug,
+                errorMessage(error),
+                attempt.attemptId,
+              )
+            )
+              return "exhausted";
             continue;
           }
-
           this.store.markAmbiguous(
-            market.marketSlug,
+            slug,
             `Submission status unknown: ${errorMessage(error)}`,
+            attempt.attemptId,
           );
           return "ambiguous";
         }
+        if (!response?.id) {
+          this.store.markAmbiguous(
+            slug,
+            "Polymarket returned no order ID; automatic retries are blocked.",
+            attempt.attemptId,
+          );
+          return "ambiguous";
+        }
+        this.store.bindOrder(slug, attempt.attemptId, response.id);
+        // Process both channels together, with fills taking precedence over a rejected remainder.
+        const executions = [
+          ...(response.executions || []).map((execution) => ({
+            ...execution,
+            order: { ...execution.order, id: response.id, marketSlug: slug },
+          })),
+          ...(this.earlyExecutions.get(response.id) || []),
+        ];
+        this.earlyExecutions.delete(response.id);
+        if (
+          responseHasAnyFill({ ...response, executions } as CreateOrderResponse)
+        ) {
+          this.store.markFilled(slug, response.id, attempt.attemptId);
+          return "filled";
+        }
+        for (const execution of executions)
+          this.handleOrderExecution(execution as ParsedOrderExecution);
+        // Some compact REST executions omit marketSlug/order ID; the enclosing response is correlated.
+        if (responseWasRejected(response))
+          this.store.markExplicitRejection(
+            slug,
+            rejectionText(response),
+            attempt.attemptId,
+          );
+        const recorded = this.store.getAttempt(slug)!;
+        if (recorded.status === "retryable") {
+          continue;
+        }
+        if (recorded.status === "exhausted") return "exhausted";
+        if (recorded.status === "canceled") return "canceled";
+        if (recorded.status === "filled") return "filled";
+        this.store.markSubmitted(slug, response.id, attempt.attemptId);
+        return "submitted";
       }
     } finally {
-      this.processing.delete(market.marketSlug);
+      this.processing.delete(slug);
     }
   }
 
-  private async waitBeforeRetry(attemptNumber: number) {
-    const delay = RETRY_DELAYS_MS[Math.min(attemptNumber - 1, RETRY_DELAYS_MS.length - 1)];
-    await this.adapter.sleep(delay);
+  private async waitBeforeRetry(
+    attemptNumber: number,
+    valid: () => boolean,
+    delayMs?: number,
+  ) {
+    let remaining =
+      delayMs ??
+      RETRY_DELAYS_MS[Math.min(attemptNumber - 1, RETRY_DELAYS_MS.length - 1)];
+    while (remaining > 0) {
+      if (!valid()) return false;
+      const interval = Math.min(250, remaining);
+      await this.adapter.sleep(interval);
+      remaining -= interval;
+    }
+    return valid();
   }
 }

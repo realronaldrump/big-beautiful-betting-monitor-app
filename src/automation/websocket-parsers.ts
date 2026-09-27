@@ -1,3 +1,6 @@
+import { availableCash } from "@/lib/balances";
+import type { RawUserBalance } from "@/lib/polymarket-types";
+
 export interface ParsedOrderExecution {
   type?: string;
   text?: string;
@@ -17,6 +20,7 @@ function record(value: unknown): Record<string, unknown> | null {
 }
 
 function finiteNumber(value: unknown) {
+  if (value === null || value === undefined || value === "") return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -44,7 +48,11 @@ export function extractAccountBalances(message: unknown) {
   const buyingPower = finiteNumber(usd.buyingPower);
   if (currentBalance === null || buyingPower === null) return null;
 
-  return { currentBalance, buyingPower };
+  const cash =
+    usd.displayedCash !== undefined || usd.marginRequirement !== undefined
+      ? availableCash({ ...usd, currentBalance } as RawUserBalance)
+      : currentBalance;
+  return { currentBalance: cash, buyingPower };
 }
 
 export function extractOrderExecution(
@@ -72,8 +80,7 @@ export function extractOrderExecution(
       id: typeof order.id === "string" ? order.id : undefined,
       marketSlug: order.marketSlug,
       state: typeof order.state === "string" ? order.state : undefined,
-      cumQuantity:
-        typeof order.cumQuantity === "number" ? order.cumQuantity : undefined,
+      cumQuantity: finiteNumber(order.cumQuantity) ?? undefined,
     },
   };
 }

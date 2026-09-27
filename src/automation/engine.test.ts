@@ -9,6 +9,7 @@ describe("AutomationEngine", () => {
   const testDirectories: string[] = [];
 
   afterEach(() => {
+    vi.useRealTimers();
     for (const directory of testDirectories.splice(0)) {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -23,7 +24,9 @@ describe("AutomationEngine", () => {
   it("submits at a configured trigger with the configured execution cap", async () => {
     const store = makeStore();
     const previewOrder = vi.fn().mockResolvedValue(undefined);
-    const createOrder = vi.fn().mockResolvedValue({ id: "order-1", executions: [] });
+    const createOrder = vi
+      .fn()
+      .mockResolvedValue({ id: "order-1", executions: [] });
     const adapter: TradingAdapter = {
       previewOrder,
       createOrder,
@@ -57,17 +60,20 @@ describe("AutomationEngine", () => {
     });
 
     expect(previewOrder).toHaveBeenCalledTimes(1);
-    expect(createOrder).toHaveBeenCalledWith({
-      marketSlug: "rockies-win",
-      intent: "ORDER_INTENT_BUY_LONG",
-      type: "ORDER_TYPE_LIMIT",
-      price: { value: "0.92", currency: "USD" },
-      quantity: 1.08,
-      tif: "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
-      participateDontInitiate: false,
-      manualOrderIndicator: "MANUAL_ORDER_INDICATOR_AUTOMATIC",
-      synchronousExecution: true,
-    });
+    expect(createOrder).toHaveBeenCalledWith(
+      {
+        marketSlug: "rockies-win",
+        intent: "ORDER_INTENT_BUY_LONG",
+        type: "ORDER_TYPE_LIMIT",
+        price: { value: "0.92", currency: "USD" },
+        quantity: 1.08,
+        tif: "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+        participateDontInitiate: false,
+        manualOrderIndicator: "MANUAL_ORDER_INDICATOR_AUTOMATIC",
+        synchronousExecution: true,
+      },
+      expect.any(Function),
+    );
     expect(store.getAttempt("rockies-win")).toMatchObject({
       status: "submitted",
       orderId: "order-1",
@@ -138,7 +144,9 @@ describe("AutomationEngine", () => {
       triggerPrice: 0.95,
       executionCap: 0.96,
     });
-    const createOrder = vi.fn().mockResolvedValue({ id: "order-no", executions: [] });
+    const createOrder = vi
+      .fn()
+      .mockResolvedValue({ id: "order-no", executions: [] });
     const adapter: TradingAdapter = {
       previewOrder: vi.fn().mockResolvedValue(undefined),
       createOrder,
@@ -171,13 +179,15 @@ describe("AutomationEngine", () => {
         price: { value: "0.04", currency: "USD" },
         quantity: 1.04,
       }),
+      expect.any(Function),
     );
     expect(store.getAttempt("broncos-cover")?.outcome).toBe("No");
 
     store.close();
   });
 
-  it("rechecks the quote and balance across three rejection retries", async () => {
+  it("uses interruptible retries without per-retry REST polling", async () => {
+    vi.useFakeTimers();
     const store = makeStore();
     store.updateConfig({
       enabled: true,
@@ -210,8 +220,12 @@ describe("AutomationEngine", () => {
       .mockResolvedValueOnce(rejected)
       .mockResolvedValueOnce(rejected)
       .mockResolvedValueOnce(filled);
-    const sleep = vi.fn().mockResolvedValue(undefined);
-    const getQuote = vi.fn().mockResolvedValue({ bestBid: 0.94, bestAsk: 0.95 });
+    const sleep = vi.fn().mockImplementation(async (ms: number) => {
+      vi.setSystemTime(Date.now() + ms);
+    });
+    const getQuote = vi
+      .fn()
+      .mockResolvedValue({ bestBid: 0.94, bestAsk: 0.95 });
     const getBalances = vi
       .fn()
       .mockResolvedValue({ currentBalance: 250, buyingPower: 100 });
@@ -242,13 +256,17 @@ describe("AutomationEngine", () => {
     });
 
     expect(createOrder).toHaveBeenCalledTimes(4);
-    expect(sleep.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([
-      1_000,
-      2_000,
-      4_000,
-    ]);
-    expect(getQuote).toHaveBeenCalledTimes(3);
-    expect(getBalances).toHaveBeenCalledTimes(3);
+    expect(
+      sleep.mock.calls.reduce(
+        (total, [milliseconds]) => total + milliseconds,
+        0,
+      ),
+    ).toBe(7_000);
+    expect(
+      sleep.mock.calls.every(([milliseconds]) => milliseconds <= 250),
+    ).toBe(true);
+    expect(getQuote).not.toHaveBeenCalled();
+    expect(getBalances).not.toHaveBeenCalled();
     expect(store.getAttempt("nuggets-win")).toMatchObject({
       status: "filled",
       attempts: 4,
@@ -266,7 +284,9 @@ describe("AutomationEngine", () => {
       triggerPrice: 0.95,
       executionCap: 0.96,
     });
-    const createOrder = vi.fn().mockRejectedValue(new Error("connection reset"));
+    const createOrder = vi
+      .fn()
+      .mockRejectedValue(new Error("connection reset"));
     const adapter: TradingAdapter = {
       previewOrder: vi.fn().mockResolvedValue(undefined),
       createOrder,
@@ -308,7 +328,9 @@ describe("AutomationEngine", () => {
       triggerPrice: 0.75,
       executionCap: 0.96,
     });
-    const rateLimit = Object.assign(new Error("Too Many Requests"), { status: 429 });
+    const rateLimit = Object.assign(new Error("Too Many Requests"), {
+      status: 429,
+    });
     const adapter: TradingAdapter = {
       previewOrder: vi.fn().mockRejectedValue(rateLimit),
       createOrder: vi.fn(),

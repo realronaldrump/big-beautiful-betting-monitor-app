@@ -1,3 +1,12 @@
+import { availableCash } from "@/lib/balances";
+import {
+  buildAccounting,
+  recoveredClosedPosition,
+  meaningfulOutcome,
+  tradeCash,
+  tradePrice,
+  type MarketAccounting,
+} from "@/lib/trade-accounting";
 import type {
   ActivityRow,
   BetResult,
@@ -29,7 +38,8 @@ interface DashboardInput {
 }
 
 function toNumber(value: string | number | null | undefined): number {
-  const parsed = typeof value === "number" ? value : Number.parseFloat(value ?? "0");
+  const parsed =
+    typeof value === "number" ? value : Number.parseFloat(value ?? "0");
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
@@ -64,19 +74,52 @@ function resultFor(pnl: number, isOpen: boolean): BetResult {
   return "push";
 }
 
-function toPositionRow(marketSlug: string, position: RawPosition): PositionRow {
+function toPositionRow(
+  marketSlug: string,
+  position: RawPosition,
+  accounting?: MarketAccounting,
+): PositionRow {
   const netQuantity = quantity(position);
-  const traded = boughtQuantity(position) + soldQuantity(position) > POSITION_TOLERANCE;
-  const isOpen = !position.expired && Math.abs(netQuantity) > POSITION_TOLERANCE;
-  const realizedPnl = amountValue(position.realized);
-  const costBasis = amountValue(position.cost);
+  const traded =
+    boughtQuantity(position) + soldQuantity(position) > POSITION_TOLERANCE;
+  const isOpen =
+    !position.expired && Math.abs(netQuantity) > POSITION_TOLERANCE;
+  const ledgerMatches =
+    accounting?.reliable &&
+    Math.abs(accounting.position - (isOpen ? netQuantity : 0)) <
+      POSITION_TOLERANCE;
+  const costBasis = ledgerMatches
+    ? accounting.basis
+    : amountValue(position.cost);
+  const realizedPnl = ledgerMatches
+    ? accounting.cashFlow + (isOpen ? costBasis : 0)
+    : amountValue(position.realized) -
+      (isOpen ? 0 : accounting?.fallbackClosedFees || 0);
   const marketValue = amountValue(position.cashValue);
   const openPnl = isOpen ? marketValue - costBasis : 0;
 
   return {
     marketSlug,
+    side:
+      accounting?.side ||
+      (isOpen ? (netQuantity < 0 ? "no" : "yes") : undefined),
+    amountBet: accounting?.reliable
+      ? accounting.amountBet
+      : (accounting?.fallbackStake ?? (isOpen ? costBasis : null)),
+    feesPaid: accounting?.reliable
+      ? accounting.feesPaid
+      : accounting?.feesPaid ||
+        accounting?.fallbackClosedFees ||
+        amountValue(position.fees),
+    entryQuantity: accounting?.entryQuantity || Math.abs(netQuantity),
+    tradeCount: accounting?.tradeCount || 0,
+    openedAt: accounting?.openedAt || position.updateTime || "",
+    eventSlug: position.marketMetadata?.eventSlug || accounting?.eventSlug,
     title: position.marketMetadata?.title || slugToTitle(marketSlug),
-    outcome: position.marketMetadata?.outcome || (netQuantity < 0 ? "NO" : "YES"),
+    outcome:
+      meaningfulOutcome(position.marketMetadata?.outcome) ||
+      accounting?.outcome ||
+      (isOpen ? (netQuantity < 0 ? "NO" : "YES") : "Outcome unavailable"),
     result: resultFor(realizedPnl, isOpen || !traded),
     isOpen,
     quantity: netQuantity,
@@ -88,8 +131,13 @@ function toPositionRow(marketSlug: string, position: RawPosition): PositionRow {
   };
 }
 
-function latestResolutionPositions(activities: RawActivity[]): Map<string, RawPosition> {
-  const latest = new Map<string, { timestamp: number; position: RawPosition }>();
+function latestResolutionPositions(
+  activities: RawActivity[],
+): Map<string, RawPosition> {
+  const latest = new Map<
+    string,
+    { timestamp: number; position: RawPosition }
+  >();
 
   for (const activity of activities) {
     const resolution = activity.positionResolution;
@@ -101,7 +149,8 @@ function latestResolutionPositions(activities: RawActivity[]): Map<string, RawPo
     const position = after || before;
     if (!position) continue;
 
-    const timestamp = Date.parse(resolution.updateTime || position.updateTime || "") || 0;
+    const timestamp =
+      Date.parse(resolution.updateTime || position.updateTime || "") || 0;
     const existing = latest.get(marketSlug);
     if (!existing || timestamp >= existing.timestamp) {
       latest.set(marketSlug, {
@@ -110,16 +159,26 @@ function latestResolutionPositions(activities: RawActivity[]): Map<string, RawPo
           ...position,
           expired: true,
           updateTime: resolution.updateTime || position.updateTime,
-          marketMetadata: position.marketMetadata || before?.marketMetadata || after?.marketMetadata,
+          marketMetadata: {
+            ...before?.marketMetadata,
+            ...position.marketMetadata,
+            outcome:
+              meaningfulOutcome(position.marketMetadata?.outcome) ||
+              before?.marketMetadata?.outcome,
+          },
         },
       });
     }
   }
 
-  return new Map([...latest.entries()].map(([slug, value]) => [slug, value.position]));
+  return new Map(
+    [...latest.entries()].map(([slug, value]) => [slug, value.position]),
+  );
 }
 
-function balanceTransactions(change?: RawAccountBalanceChange): RawBalanceTransaction[] {
+function balanceTransactions(
+  change?: RawAccountBalanceChange,
+): RawBalanceTransaction[] {
   if (!change) return [];
   if (change.transactions?.length) return change.transactions;
   if (change.transactionId || change.amount) return [change];
@@ -160,18 +219,16 @@ function normalizeActivity(
   if (activity.trade) {
     const trade = activity.trade;
     const marketSlug = trade.marketSlug || "unknown-market";
-    const tradeNotional = Math.abs(
-      amountValue(trade.costBasis) ||
-        amountValue(trade.price) * toNumber(trade.qtyDecimal ?? trade.qty),
-    );
+    const tradeNotional = tradeCash(trade);
 
     return [
       {
         id: trade.id || `trade-${index}`,
+        marketSlug,
         kind: "trade",
         type,
         label: positionTitles.get(marketSlug) || slugToTitle(marketSlug),
-        detail: `${toNumber(trade.qtyDecimal ?? trade.qty).toLocaleString(undefined, { maximumFractionDigits: 2 })} shares at ${amountValue(trade.price).toLocaleString("en-US", { style: "currency", currency: "USD" })}`,
+        detail: `${toNumber(trade.qtyDecimal ?? trade.qty).toLocaleString(undefined, { maximumFractionDigits: 2 })} shares at ${tradePrice(trade).toLocaleString("en-US", { style: "currency", currency: "USD" })}`,
         amount: tradeNotional,
         realizedPnl: trade.realizedPnl ? amountValue(trade.realizedPnl) : null,
         status: trade.state || "",
@@ -187,10 +244,14 @@ function normalizeActivity(
     return [
       {
         id: resolution.tradeId || `resolution-${marketSlug}-${index}`,
+        marketSlug,
         kind: "settlement",
         type,
-        label: position?.marketMetadata?.title || positionTitles.get(marketSlug) || slugToTitle(marketSlug),
-        detail: `${position?.marketMetadata?.outcome || resolution.side || "Position"} finished`,
+        label:
+          position?.marketMetadata?.title ||
+          positionTitles.get(marketSlug) ||
+          slugToTitle(marketSlug),
+        detail: `${meaningfulOutcome(position?.marketMetadata?.outcome) || resolution.beforePosition?.marketMetadata?.outcome || "Position"} finished`,
         amount: null,
         realizedPnl: position?.realized ? amountValue(position.realized) : null,
         status: "SETTLED",
@@ -245,27 +306,61 @@ export function calculateDashboard({
   generatedAt = new Date().toISOString(),
 }: DashboardInput): DashboardSnapshot {
   const rawActivities = activitiesResponse.activities || [];
-  const combinedPositions = new Map(Object.entries(positionsResponse.positions || {}));
+  const accounting = buildAccounting(rawActivities);
+  const combinedPositions = new Map(
+    Object.entries(positionsResponse.positions || {}),
+  );
 
-  for (const [slug, resolvedPosition] of latestResolutionPositions(rawActivities)) {
-    if (!combinedPositions.has(slug)) combinedPositions.set(slug, resolvedPosition);
+  for (const [slug, resolvedPosition] of latestResolutionPositions(
+    rawActivities,
+  )) {
+    const existing = combinedPositions.get(slug);
+    if (
+      !existing ||
+      (Date.parse(resolvedPosition.updateTime || "") || 0) >
+        (Date.parse(existing.updateTime || "") || 0)
+    )
+      combinedPositions.set(slug, resolvedPosition);
+  }
+
+  for (const [slug, account] of accounting) {
+    if (!combinedPositions.has(slug)) {
+      const recovered = recoveredClosedPosition(account);
+      if (recovered) combinedPositions.set(slug, recovered);
+    }
   }
 
   const positions = [...combinedPositions.entries()]
-    .map(([slug, position]) => toPositionRow(slug, position))
+    .map(([slug, position]) =>
+      toPositionRow(slug, position, accounting.get(slug)),
+    )
     .filter((position) => position.isOpen || position.result !== "open")
-    .sort((a, b) => Number(b.isOpen) - Number(a.isOpen) || compareDatesDescending(a.updatedAt, b.updatedAt));
+    .sort(
+      (a, b) =>
+        Number(b.isOpen) - Number(a.isOpen) ||
+        compareDatesDescending(a.updatedAt, b.updatedAt),
+    );
 
-  const positionTitles = new Map(positions.map((position) => [position.marketSlug, position.title]));
+  const positionTitles = new Map(
+    positions.map((position) => [position.marketSlug, position.title]),
+  );
   const activities = rawActivities
-    .flatMap((activity, index) => normalizeActivity(activity, index, positionTitles))
+    .flatMap((activity, index) =>
+      normalizeActivity(activity, index, positionTitles),
+    )
     .sort((a, b) => compareDatesDescending(a.occurredAt, b.occurredAt));
 
   const closedPositions = positions.filter((position) => !position.isOpen);
   const openPositions = positions.filter((position) => position.isOpen);
-  const wins = closedPositions.filter((position) => position.result === "win").length;
-  const losses = closedPositions.filter((position) => position.result === "loss").length;
-  const pushes = closedPositions.filter((position) => position.result === "push").length;
+  const wins = closedPositions.filter(
+    (position) => position.result === "win",
+  ).length;
+  const losses = closedPositions.filter(
+    (position) => position.result === "loss",
+  ).length;
+  const pushes = closedPositions.filter(
+    (position) => position.result === "push",
+  ).length;
   const decisiveBets = wins + losses;
 
   const usdBalance =
@@ -278,7 +373,9 @@ export function calculateDashboard({
   let otherTransfers = 0;
 
   for (const activity of rawActivities) {
-    for (const transaction of balanceTransactions(activity.accountBalanceChange)) {
+    for (const transaction of balanceTransactions(
+      activity.accountBalanceChange,
+    )) {
       if (!isCompleted(transaction.status)) continue;
       const value = amountValue(transaction.amount);
       const absoluteValue = Math.abs(value);
@@ -306,16 +403,19 @@ export function calculateDashboard({
 
   const tradingVolume = rawActivities.reduce((total, activity) => {
     const trade = activity.trade;
-    if (!trade || trade.state?.toUpperCase().includes("BUSTED")) return total;
-    const notional = Math.abs(
-      amountValue(trade.costBasis) ||
-        amountValue(trade.price) * toNumber(trade.qtyDecimal ?? trade.qty),
-    );
+    if (!trade || /BUSTED|REJECTED/.test(trade.state || "")) return total;
+    const notional = tradeCash(trade);
     return total + notional;
   }, 0);
 
-  const realizedPnl = positions.reduce((total, position) => total + position.realizedPnl, 0);
-  const estimatedOpenPnl = openPositions.reduce((total, position) => total + position.openPnl, 0);
+  const realizedPnl = positions.reduce(
+    (total, position) => total + position.realizedPnl,
+    0,
+  );
+  const estimatedOpenPnl = openPositions.reduce(
+    (total, position) => total + position.openPnl,
+    0,
+  );
   const netFunding = deposits - withdrawals;
 
   let runningPnl = 0;
@@ -332,6 +432,43 @@ export function calculateDashboard({
       };
     });
 
+  let cumulativeRealized = 0;
+  const realizedHistory: PnlPoint[] = positions
+    .flatMap((position) => {
+      const ledger = accounting.get(position.marketSlug);
+      const events =
+        ledger?.reliable &&
+        Math.abs(ledger.position - position.quantity) < POSITION_TOLERANCE
+          ? ledger.history
+          : !position.isOpen || position.realizedPnl !== 0
+            ? [{ occurredAt: position.updatedAt, delta: position.realizedPnl }]
+            : [];
+      return events.map((event) => ({
+        ...event,
+        marketSlug: position.marketSlug,
+        label: position.title,
+        cumulative: 0,
+      }));
+    })
+    .sort(
+      (a, b) =>
+        (Date.parse(a.occurredAt) || 0) - (Date.parse(b.occurredAt) || 0),
+    )
+    .map((point) => {
+      cumulativeRealized += point.delta;
+      return { ...point, cumulative: cumulativeRealized };
+    });
+  for (const activity of activities) {
+    if (activity.kind === "settlement" && activity.marketSlug) {
+      const point = realizedHistory.find(
+        (entry) =>
+          entry.marketSlug === activity.marketSlug &&
+          entry.occurredAt === activity.occurredAt,
+      );
+      if (point) activity.realizedPnl = point.delta;
+    }
+  }
+
   return {
     mode,
     setupRequired: mode === "demo",
@@ -347,9 +484,12 @@ export function calculateDashboard({
       realizedPnl,
       estimatedOpenPnl,
       estimatedTotalPnl: realizedPnl + estimatedOpenPnl,
-      openPositionValue: openPositions.reduce((total, position) => total + position.marketValue, 0),
+      openPositionValue: openPositions.reduce(
+        (total, position) => total + position.marketValue,
+        0,
+      ),
       tradingVolume,
-      currentBalance: usdBalance?.currentBalance || 0,
+      currentBalance: usdBalance ? availableCash(usdBalance) : 0,
       buyingPower: usdBalance?.buyingPower || 0,
       unsettledFunds: usdBalance?.unsettledFunds || 0,
       deposits,
@@ -362,9 +502,10 @@ export function calculateDashboard({
     positions,
     activities,
     pnlHistory,
+    realizedHistory,
     notes: [
-      "Each finished bet counts as a win, loss, or tie based on its final profit or loss.",
-      "Open profit/loss estimates what you would receive by selling now minus what you paid.",
+      "Bets are grouped by market. Results and profit/loss include recorded trading fees.",
+      "Cash excludes collateral reserved for short positions. Open profit/loss uses current position value minus remaining cost.",
       "Net money added includes completed deposits and withdrawals; advance credits are excluded to avoid counting them twice.",
     ],
   };

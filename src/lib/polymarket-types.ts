@@ -23,6 +23,8 @@ export interface RawPosition {
   bodPosition?: string;
   bodPositionDecimal?: string;
   cost?: RawAmount;
+  baseCost?: RawAmount;
+  fees?: RawAmount;
   realized?: RawAmount;
   cashValue?: RawAmount;
   expired?: boolean;
@@ -36,6 +38,12 @@ export interface RawPositionsResponse {
   eof?: boolean;
 }
 
+export interface RawExecution {
+  id?: string;
+  commissionNotionalCollected?: RawAmount;
+  order?: { intent?: string; marketMetadata?: RawMarketMetadata };
+}
+
 export interface RawTrade {
   id?: string;
   marketSlug?: string;
@@ -46,6 +54,15 @@ export interface RawTrade {
   qty?: string;
   qtyDecimal?: string;
   isAggressor?: boolean;
+  cost?: RawAmount;
+  aggressorExecution?: RawExecution;
+  passiveExecution?: RawExecution;
+  market?: {
+    title?: string;
+    question?: string;
+    eventSlug?: string;
+    slug?: string;
+  };
   costBasis?: RawAmount;
   realizedPnl?: RawAmount;
 }
@@ -98,6 +115,7 @@ export interface RawActivitiesResponse {
 
 export interface RawUserBalance {
   currentBalance?: number;
+  displayedCash?: number;
   currency?: string;
   lastUpdated?: string;
   buyingPower?: number;
