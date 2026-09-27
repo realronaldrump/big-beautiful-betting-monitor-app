@@ -50,3 +50,7 @@ The automated suite covers transport signing/pacing/dispatch, worker lifecycle, 
 ## Host SQLite compatibility
 
 The application uses SQLite 3.53, while the mini-PC Python maintenance tools use 3.45. The older integrity checker reports a false NULL constraint violation for an unmaterialized REAL default added to existing records. A minimal fixture reproduced this on the host despite ordinary reads finding zero NULL values; explicitly updating the field to its own value cleared the warning. Migration version 1 writes the reserve defaults into existing rows once, without changing their values or any settings/history. Regression coverage verifies both record preservation and one-time execution.
+
+## Live stream protocol verification
+
+A read-only exchange probe verified that `ORDER` is a change stream and an initial open-order snapshot must be requested separately with `ORDER_SNAPSHOT`. An idle account balance subscription does not necessarily return an initial snapshot. The worker now requests the separate order snapshot and bootstraps balances once through paced REST, while consuming private balance changes and retaining periodic reconciliation. The exchange's `accountBalancesUpdate.balanceChange.afterBalance` and `positionSubscription` envelopes are routed explicitly because SDK 0.1.1 does not classify them. No per-quote polling or live test orders are introduced.

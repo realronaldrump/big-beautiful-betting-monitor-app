@@ -1,3 +1,4 @@
+import { subscribeOrderSnapshot } from "./websocket-subscriptions";
 import type {
   MarketDataLite,
   MarketsWebSocket,
@@ -26,6 +27,7 @@ import {
 } from "@/lib/polymarket-rest";
 import { getAutomationStore, type AutomationStore } from "@/automation/store";
 import {
+  isAdditionalBalanceUpdate,
   type ParsedOrderExecution,
   extractAccountBalances,
   extractOrderExecution,
@@ -389,6 +391,10 @@ export class AutomationWorker {
     if (this.balanceSequence === sequence && !this.shuttingDown) {
       this.lastBalanceAt = Date.now();
       this.store.updateRuntime(balances);
+      // Balances are a change stream and may send no initial snapshot while idle.
+      // Bootstrap once from REST, then consume streamed changes and reconcile periodically.
+      this.privateBalanceReady = Boolean(this.privateSocket?.isConnected);
+      for (const slug of this.latestQuotes.keys()) this.scheduleMarket(slug);
     }
   }
 
@@ -590,6 +596,10 @@ export class AutomationWorker {
     socket.on("accountBalanceSnapshot", (message) => {
       if (this.privateSocket === socket) this.handleAccountBalances(message);
     });
+    socket.on("message", (message) => {
+      if (this.privateSocket === socket && isAdditionalBalanceUpdate(message))
+        this.handleAccountBalances(message);
+    });
     socket.on("accountBalanceUpdate", (message) => {
       if (this.privateSocket === socket) this.handleAccountBalances(message);
     });
@@ -601,6 +611,8 @@ export class AutomationWorker {
         this.privateSocket = null;
         this.privateBalanceReady = false;
         this.privateOrdersReady = false;
+        this.lastBalanceAt = 0;
+        this.balanceSequence += 1;
         this.quoteQueueGeneration += 1;
       }
     });
@@ -612,6 +624,7 @@ export class AutomationWorker {
         this.store.getConfig().enabled,
     );
     socket.subscribeOrders("bbbm-orders");
+    subscribeOrderSnapshot(socket, "bbbm-orders-snapshot");
     socket.subscribeAccountBalance("bbbm-balance");
   }
 
@@ -638,7 +651,13 @@ export class AutomationWorker {
   }
   private handleAccountBalances(message: unknown) {
     const balances = extractAccountBalances(message);
-    if (!balances || this.shuttingDown) return;
+    if (this.shuttingDown) return;
+    if (!balances) {
+      this.privateBalanceReady = false;
+      this.lastBalanceAt = 0;
+      this.balanceSequence += 1;
+      return;
+    }
     this.privateBalanceReady = true;
     this.balanceSequence += 1;
     this.lastBalanceAt = Date.now();

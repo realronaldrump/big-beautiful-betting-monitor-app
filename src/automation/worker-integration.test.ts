@@ -10,6 +10,7 @@ class Socket extends EventEmitter {
   isConnected = false;
   subscribeCalls = 0;
   fail = false;
+  snapshotBalance = true;
   async connect() {
     this.isConnected = true;
   }
@@ -17,13 +18,16 @@ class Socket extends EventEmitter {
     this.isConnected = false;
     this.emit("close");
   }
-  subscribeOrders() {
+  subscribeOrders() {}
+  subscribe(_id: string, type: string) {
+    if (type !== "SUBSCRIPTION_TYPE_ORDER_SNAPSHOT")
+      throw new Error("Explicit order snapshot required");
     this.emit("orderSnapshot", {
       orderSubscriptionSnapshot: { orders: [], eof: true },
     });
   }
   subscribeAccountBalance() {
-    this.balance(250);
+    if (this.snapshotBalance) this.balance(250);
   }
   subscribeMarketDataLite() {
     this.subscribeCalls++;
@@ -76,6 +80,7 @@ function fixture(
     enabled?: boolean;
     credentials?: boolean;
     failSubscription?: boolean;
+    noBalanceSnapshot?: boolean;
   } = {},
 ) {
   const store = new AutomationStore(":memory:");
@@ -98,6 +103,7 @@ function fixture(
       },
       private: () => {
         const socket = new Socket();
+        socket.snapshotBalance = !options.noBalanceSnapshot;
         privates.push(socket);
         return socket;
       },
@@ -267,4 +273,23 @@ it("reconnects failed subscriptions and never calls them Armed", async () => {
     state: "watching",
     lastError: null,
   });
+});
+
+it("bootstraps an idle balance change stream without waiting for a nonexistent initial snapshot", async () => {
+  const f = fixture({ noBalanceSnapshot: true });
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(f.adapter.getBalances).toHaveBeenCalledTimes(1);
+  expect(f.store.getRuntime().state).toBe("watching");
+  f.privates[0].emit("message", {
+    accountBalancesUpdate: {
+      balanceChange: {
+        afterBalance: {
+          currentBalance: 102,
+          buyingPower: 102,
+          displayedCash: 102,
+        },
+      },
+    },
+  });
+  expect(f.store.getRuntime().currentBalance).toBe(102);
 });

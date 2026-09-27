@@ -8,13 +8,19 @@ describe("extractOrderExecution", () => {
   it("reads both documented and newer SDK order-update envelopes", () => {
     const execution = {
       type: "EXECUTION_TYPE_FILL",
-      order: { id: "order-1", marketSlug: "market-1", state: "ORDER_STATE_FILLED" },
+      order: {
+        id: "order-1",
+        marketSlug: "market-1",
+        state: "ORDER_STATE_FILLED",
+      },
     };
 
     expect(
       extractOrderExecution({ orderSubscriptionUpdate: { execution } }),
     ).toEqual(execution);
-    expect(extractOrderExecution({ orderUpdate: { execution } })).toEqual(execution);
+    expect(extractOrderExecution({ orderUpdate: { execution } })).toEqual(
+      execution,
+    );
   });
 
   it("returns null for unrelated or incomplete messages", () => {
@@ -46,4 +52,21 @@ describe("extractOrderExecution", () => {
       }),
     ).toEqual({ currentBalance: 154.71, buyingPower: 152.38 });
   });
+});
+
+it("reads the current nested account balance change envelope", () => {
+  expect(
+    extractAccountBalances({
+      accountBalancesUpdate: {
+        balanceChange: {
+          afterBalance: {
+            currentBalance: 152,
+            displayedCash: 142,
+            marginRequirement: 10,
+            buyingPower: 142,
+          },
+        },
+      },
+    }),
+  ).toEqual({ currentBalance: 142, buyingPower: 142 });
 });

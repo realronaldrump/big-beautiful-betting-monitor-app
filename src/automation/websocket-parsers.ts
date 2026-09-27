@@ -33,19 +33,26 @@ export function extractAccountBalances(message: unknown) {
     envelope.accountBalanceSubscriptionSnapshot ||
       envelope.accountBalancesSnapshot ||
       envelope.accountBalanceSubscriptionUpdate ||
-      envelope.accountBalanceUpdate,
+      envelope.accountBalanceUpdate ||
+      envelope.accountBalancesUpdate ||
+      envelope.account_balances_update,
   );
   if (!payload) return null;
 
+  const change = record(payload.balanceChange || payload.balance_change);
+  const after = record(change?.afterBalance || change?.after_balance);
   const balances = Array.isArray(payload.balances) ? payload.balances : [];
   const usd =
+    after ||
     balances.map(record).find((balance) => balance?.currency === "USD") ||
     balances.map(record).find(Boolean) ||
     payload;
   if (!usd) return null;
 
-  const currentBalance = finiteNumber(usd.currentBalance ?? usd.balance);
-  const buyingPower = finiteNumber(usd.buyingPower);
+  const currentBalance = finiteNumber(
+    usd.currentBalance ?? usd.current_balance ?? usd.balance,
+  );
+  const buyingPower = finiteNumber(usd.buyingPower ?? usd.buying_power);
   if (currentBalance === null || buyingPower === null) return null;
 
   const cash =
@@ -83,4 +90,19 @@ export function extractOrderExecution(
       cumQuantity: finiteNumber(order.cumQuantity) ?? undefined,
     },
   };
+}
+
+/** Payloads emitted by the exchange but not classified by SDK 0.1.1. */
+export function isAdditionalBalanceUpdate(message: unknown) {
+  const envelope = record(message);
+  return Boolean(
+    envelope?.accountBalancesUpdate || envelope?.account_balances_update,
+  );
+}
+export function isAdditionalAccountUpdate(message: unknown) {
+  const envelope = record(message);
+  return (
+    isAdditionalBalanceUpdate(message) ||
+    Boolean(envelope?.positionSubscription || envelope?.position_subscription)
+  );
 }

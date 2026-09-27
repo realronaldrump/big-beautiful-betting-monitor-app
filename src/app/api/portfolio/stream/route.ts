@@ -1,3 +1,4 @@
+import { isAdditionalAccountUpdate } from "@/automation/websocket-parsers";
 import { NextResponse } from "next/server";
 import {
   createPrivateAccountStream,
@@ -62,6 +63,9 @@ export async function GET(request: Request): Promise<Response> {
       socket.on("orderUpdate", notify);
       socket.on("positionUpdate", notify);
       socket.on("accountBalanceUpdate", notify);
+      socket.on("message", (message) => {
+        if (isAdditionalAccountUpdate(message)) notify();
+      });
       socket.on("error", (error) => {
         console.error("Polymarket US private stream failed", error);
         send("stream-error", { message: "Real-time connection interrupted." });
